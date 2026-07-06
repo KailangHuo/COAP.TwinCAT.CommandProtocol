@@ -1,0 +1,6 @@
+D:\System\Document\GitHub\COAP\CoapClient\CoapClient\obj\Debug\netstandard2.0\CoapClient.csproj.AssemblyReference.cache
+D:\System\Document\GitHub\COAP\CoapClient\CoapClient\obj\Debug\netstandard2.0\CoapClient.GeneratedMSBuildEditorConfig.editorconfig
+D:\System\Document\GitHub\COAP\CoapClient\CoapClient\obj\Debug\netstandard2.0\CoapClient.AssemblyInfoInputs.cache
+D:\System\Document\GitHub\COAP\CoapClient\CoapClient\obj\Debug\netstandard2.0\CoapClient.AssemblyInfo.cs
+D:\System\Document\GitHub\COAP\CoapClient\CoapClient\obj\Debug\netstandard2.0\CoapClient.csproj.CoreCompileInputs.cache
+D:\System\Document\GitHub\COAP\CoapClient\CoapClient\obj\Debug\netstandard2.0\CoapClient.sourcelink.json

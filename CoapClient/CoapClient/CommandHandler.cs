@@ -1,0 +1,55 @@
+﻿using TwinCAT.Ads;
+
+namespace CoapClient
+{
+    internal class CommandHandler
+    {
+        public CommandHandler()
+        {
+            this.NotificationQueue = new SingleConsumerQueue<INotification>(OnNotificationReceived);
+        }
+
+        private SingleConsumerQueue<INotification> NotificationQueue;
+
+        public void EnqueueNotification(INotification iNotification)
+        {
+            this.NotificationQueue.EnqueueItem(iNotification);
+        }
+    
+        private void OnNotificationReceived(INotification e)
+        {
+            CoapLog.Info($"Handle Ads-Notification Command! handle : {e.Handle}");
+            try
+            {
+                if (e.UserData == null) throw new ArgumentNullException($"notification.UserData is NULL!");
+                CommandContext commandContext = (CommandContext)e.UserData;
+                commandContext.SetNotificationHandle(e.Handle);
+                if (commandContext.IsFinished())
+                {
+                    commandContext.TryCleanupNotificationHandle(e.Handle);
+                    return;
+                }
+                commandContext.SetValue(e.Data.ToArray());
+                bool commandValidated = commandContext.TryValidCommandOnServerRecall();
+                if (commandValidated) CoapLog.Info($"ACK-ed! {commandContext.Command.AckVarName} : raw-{e.Data}");
+                if (commandValidated) return;
+
+                bool isHandShakeFrame = commandContext.TryHandShake();
+                if (isHandShakeFrame) this.HandShakeTriggered?.Invoke(this, commandContext);
+            }
+            catch (Exception ex)
+            {
+                if (e.UserData is CommandContext commandContext)
+                {
+                    commandContext.TrySetBusinessResult(ex);
+                }
+                CoapLog.Error("Errored! " + ex.Message);
+            }
+        }
+
+        public event EventHandler<CommandContext> HandShakeTriggered;
+
+
+
+    }
+}

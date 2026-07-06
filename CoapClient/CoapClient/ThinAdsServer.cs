@@ -1,0 +1,121 @@
+﻿using TwinCAT;
+using TwinCAT.Ads;
+using TwinCAT.Ads.SumCommand;
+using TwinCAT.Ads.TypeSystem;
+using TwinCAT.TypeSystem;
+
+namespace CoapClient
+{
+    internal class ThinAdsServer : ICommandDispatcher
+    {
+        public ThinAdsServer()
+        {
+            AdsClient = new AdsClient();
+            this.CommandHandler = new CommandHandler();
+            this.CommandHandler.HandShakeTriggered += CommandHandlerOnHandShakeTriggered;
+
+            this.AdsClient.AdsNotification += AdsClientOnAdsNotification;
+        }
+
+        private void CommandHandlerOnHandShakeTriggered(object? sender, CommandContext e)
+        {
+            this.OnHandShakeSuccess?.Invoke(e);
+        }
+
+        private void AdsClientOnAdsNotification(object? sender, AdsNotificationEventArgs e)
+        {
+            CoapLog.Info("Ads-Notification received!");
+            if (e.UserData == null) return;
+            if (e.UserData is CommandContext) this.CommandHandler.EnqueueNotification(e);
+            // TODO:Observer
+        }
+
+        public AdsClient AdsClient { get; }
+
+        private ISymbolCollection<ISymbol> SymbolCollection;
+
+        private CommandHandler CommandHandler;
+
+        public void Connect(string amsNetId, int port)
+        {
+            try
+            {
+                this.AdsClient.Connect(amsNetId, port);
+                StateInfo info = this.AdsClient.ReadState();
+                ISymbolLoader loader = SymbolLoaderFactory.Create(this.AdsClient, SymbolLoaderSettings.Default);
+                this.SymbolCollection = loader.Symbols;
+            }
+            catch (Exception e)
+            {
+                throw;
+            }
+        }
+
+        public ISymbol GetSymbol(string varName)
+        {
+            if (string.IsNullOrWhiteSpace(varName))
+                throw new ArgumentException("Variable name is null or empty.", nameof(varName));
+
+            if (!SymbolCollection.Contains(varName))
+                throw new InvalidOperationException($"Symbol '{varName}' was not found.");
+
+            ISymbol symbol = SymbolCollection[varName];
+            return symbol;
+        }
+
+        public void SendCommand(VariableWriteItem variableWriteItem)
+        {
+            string varName = variableWriteItem.VarName;
+            object newVal = variableWriteItem.Value;
+            ISymbol symbol = this.GetSymbol(varName);
+            CoapLog.Info($"Write Var: {varName}, {newVal}");
+            this.AdsClient.WriteValue(symbol, newVal);
+        }
+
+        public void SendCommand(VariableWriteItem[] variableWriteItems)
+        {
+            // 不可有相同的symbol，否则会被当成一个symbol写入，导致写入失败
+            HashSet<ISymbol> symbolSet = new HashSet<ISymbol>();
+            List<ISymbol> symbolList = new List<ISymbol>();
+            List<object> valueList = new List<object>();
+            List<string> logMappings = new List<string>();
+            foreach (var item in variableWriteItems)
+            {
+                string varName = item.VarName;
+                object varValue = item.Value;
+                ISymbol symbolInfo = this.GetSymbol(varName);
+                symbolSet.Add(symbolInfo);
+                symbolList.Add(symbolInfo);
+                valueList.Add(varValue);
+                logMappings.Add($"{varName}={varValue}");
+            }
+
+            if (symbolSet.Count != symbolList.Count)
+            {
+                throw new InvalidOperationException(
+                    "Duplicate symbols found in variable write items. Each variable must be unique."
+                    );
+            }
+
+            SymbolCollection symbolCollection = new SymbolCollection();
+            symbolCollection.AddRange(symbolList);
+            SumSymbolWrite sumSymbolWrite = new SumSymbolWrite(this.AdsClient, symbolCollection);
+            CoapLog.Info($"SumSymbolWrite mapping sequence: {string.Join(", ", logMappings)}");
+            sumSymbolWrite.Write(valueList.ToArray());
+        }
+
+        public object GetVariableValue(string varName)
+        {
+            ISymbol symbol = this.GetSymbol(varName);
+            return this.AdsClient.ReadValue(symbol);
+        }
+
+        public string GetServerStatus()
+        {
+            return this.AdsClient.ReadState().AdsState.ToString();
+        }
+
+
+        public event IAdsServer.CommandContextDelegate? OnHandShakeSuccess;
+    }
+}

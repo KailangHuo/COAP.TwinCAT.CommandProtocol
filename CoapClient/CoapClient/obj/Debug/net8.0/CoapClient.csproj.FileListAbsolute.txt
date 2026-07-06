@@ -1,0 +1,13 @@
+D:\System\Document\GitHub\COAP\CoapClient\CoapClient\bin\Debug\net8.0\CoapClient.deps.json
+D:\System\Document\GitHub\COAP\CoapClient\CoapClient\bin\Debug\net8.0\CoapClient.dll
+D:\System\Document\GitHub\COAP\CoapClient\CoapClient\bin\Debug\net8.0\CoapClient.pdb
+D:\System\Document\GitHub\COAP\CoapClient\CoapClient\obj\Debug\net8.0\CoapClient.csproj.AssemblyReference.cache
+D:\System\Document\GitHub\COAP\CoapClient\CoapClient\obj\Debug\net8.0\CoapClient.GeneratedMSBuildEditorConfig.editorconfig
+D:\System\Document\GitHub\COAP\CoapClient\CoapClient\obj\Debug\net8.0\CoapClient.AssemblyInfoInputs.cache
+D:\System\Document\GitHub\COAP\CoapClient\CoapClient\obj\Debug\net8.0\CoapClient.AssemblyInfo.cs
+D:\System\Document\GitHub\COAP\CoapClient\CoapClient\obj\Debug\net8.0\CoapClient.csproj.CoreCompileInputs.cache
+D:\System\Document\GitHub\COAP\CoapClient\CoapClient\obj\Debug\net8.0\CoapClient.sourcelink.json
+D:\System\Document\GitHub\COAP\CoapClient\CoapClient\obj\Debug\net8.0\CoapClient.dll
+D:\System\Document\GitHub\COAP\CoapClient\CoapClient\obj\Debug\net8.0\refint\CoapClient.dll
+D:\System\Document\GitHub\COAP\CoapClient\CoapClient\obj\Debug\net8.0\CoapClient.pdb
+D:\System\Document\GitHub\COAP\CoapClient\CoapClient\obj\Debug\net8.0\ref\CoapClient.dll
