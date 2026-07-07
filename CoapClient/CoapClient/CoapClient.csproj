@@ -4,11 +4,28 @@
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
         <TargetFramework>net8.0</TargetFramework>
+        <PackageId>COAP.TwinCAT.CommandProtocol</PackageId>
+        <Version>0.1.0</Version>
+        <Authors>KailangHuo</Authors>
+        <Company>KailangHuo</Company>
+        <Product>CoapClient</Product>
+        <Description>Command-oriented C# middleware for Beckhoff TwinCAT ADS workflows.</Description>
+        <PackageTags>coap;twincat;ads;beckhoff;plc;automation</PackageTags>
+        <PackageProjectUrl>https://github.com/KailangHuo/TwinCAT.CommandProtocol.COAP</PackageProjectUrl>
+        <RepositoryUrl>https://github.com/KailangHuo/TwinCAT.CommandProtocol.COAP.git</RepositoryUrl>
+        <RepositoryType>git</RepositoryType>
+        <PackageLicenseExpression>MIT</PackageLicenseExpression>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
     </PropertyGroup>
 
     <ItemGroup>
       <PackageReference Include="Beckhoff.TwinCAT.Ads" Version="7.0.172" />
       <PackageReference Include="log4net" Version="3.3.2" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <None Include="..\README.md" Pack="true" PackagePath="\" />
+      <None Include="..\..\LICENSE" Pack="true" PackagePath="\" />
     </ItemGroup>
 
 </Project>

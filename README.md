@@ -10,6 +10,12 @@ It turns the common PLC interaction pattern of "write DO/AO, then poll DI/AI" in
 
 > Note: this project is not an implementation of the IETF CoAP protocol. In this project, COAP stands for Command Oriented Ads Protocol.
 
+## Command Sequence
+
+The sequence below shows how CoapClient prepares the ACK observation path before writing the command variable, then completes the command when the PLC publishes the expected ACK.
+
+![CoapClient command sequence](SequenceDiagram.png)
+
 ## Why This Project Exists
 
 In many upper-level automation applications, one complete action is modeled like this:

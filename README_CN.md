@@ -10,6 +10,12 @@ CoapClient 是一个面向 Beckhoff TwinCAT ADS 的 C# 命令式通信中间件�
 
 > 注意：本项目不是 IETF CoAP 协议的实现。在本项目中，COAP 表示 Command Oriented Ads Protocol。
 
+## 命令时序
+
+下图展示了 CoapClient 如何先准备 ACK 监听路径，再写入命令变量，并在 PLC 发布预期 ACK 后完成命令。
+
+![CoapClient 命令时序](SequenceDiagram.png)
+
 ## 项目为什么存在
 
 在很多自动化上层软件中，一个完整动作通常被建模为：
