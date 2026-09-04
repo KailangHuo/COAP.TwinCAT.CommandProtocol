@@ -162,9 +162,26 @@ namespace CoapClient
             CoapLog.Error(e.ToString());
             throw;
         }
-        
+
     }
-    
+
+    /// <summary>
+    /// Reads several PLC variables in a single ADS sum read.
+    /// The returned array is aligned with <paramref name="varNames"/> in the same order.
+    /// </summary>
+    public object[] GetSumVariableValue(string[] varNames)
+    {
+        try
+        {
+            return this.ThinAdsServer.GetSumVariableValue(varNames);
+        }
+        catch (Exception e)
+        {
+            CoapLog.Error(e.ToString());
+            throw;
+        }
+    }
+
     public string GetServerStatusString()
     {
         return this.ThinAdsServer.GetServerStatus();

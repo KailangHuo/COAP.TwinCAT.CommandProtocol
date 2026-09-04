@@ -136,7 +136,16 @@ Main entry point for callers.
 | `Connect(string amsNetId, int amsPort)` | Connects to the TwinCAT ADS server. |
 | `Task<object> SendAndWaitAck(ICoapCommand command, TimeSpan? timeSpan = null, CancellationToken cancellationToken = default)` | Sends a command and returns a task that completes when the ACK is satisfied, fails, collides, is cancelled, or times out. |
 | `object GetVariableValue(string varName)` | Reads a PLC variable value directly. |
+| `object[] GetSumVariableValue(string[] varNames)` | Reads several PLC variable values in a single ADS sum read; the result aligns with `varNames`. |
 | `string GetServerStatusString()` | Reads the ADS server state as a string. |
+
+Batch read in one ADS round-trip:
+
+```csharp
+object[] values = client.GetSumVariableValue(
+    new[] { "PC_GVAR.DI_AT_POS", "PC_GVAR.AI_PRESSURE" });
+bool atPos = (bool)values[0];
+```
 
 ### VariableWriteItem
 

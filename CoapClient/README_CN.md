@@ -136,7 +136,16 @@ catch (OperationCanceledException)
 | `Connect(string amsNetId, int amsPort)` | 连接 TwinCAT ADS Server。 |
 | `Task<object> SendAndWaitAck(ICoapCommand command, TimeSpan? timeSpan = null, CancellationToken cancellationToken = default)` | 发送命令，并返回一个在 ACK 满足、失败、冲突、取消或超时时完成的 Task。 |
 | `object GetVariableValue(string varName)` | 直接读取 PLC 变量值。 |
+| `object[] GetSumVariableValue(string[] varNames)` | 通过一次 ADS 批量读取读取多个 PLC 变量值，返回顺序与 `varNames` 一致。 |
 | `string GetServerStatusString()` | 读取 ADS Server 状态字符串。 |
+
+一次 ADS 往返批量读取多个变量：
+
+```csharp
+object[] values = client.GetSumVariableValue(
+    new[] { "PC_GVAR.DI_AT_POS", "PC_GVAR.AI_PRESSURE" });
+bool atPos = (bool)values[0];
+```
 
 ### VariableWriteItem
 

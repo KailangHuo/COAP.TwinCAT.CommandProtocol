@@ -110,6 +110,23 @@ namespace CoapClient
             return this.AdsClient.ReadValue(symbol);
         }
 
+        public object[] GetSumVariableValue(string[] varNames)
+        {
+            if (varNames == null)
+                throw new ArgumentNullException(nameof(varNames));
+            if (varNames.Length == 0)
+                return Array.Empty<object>();
+
+            List<ISymbol> symbols = new List<ISymbol>(varNames.Length);
+            foreach (string varName in varNames)
+                symbols.Add(this.GetSymbol(varName));
+
+            // Resolve name -> symbol -> ADS address, then read all in a single SUM_READ round-trip.
+            // Read() returns the values in the same order as varNames.
+            SumSymbolRead sumRead = new SumSymbolRead(this.AdsClient, symbols);
+            return sumRead.Read();
+        }
+
         public string GetServerStatus()
         {
             return this.AdsClient.ReadState().AdsState.ToString();
