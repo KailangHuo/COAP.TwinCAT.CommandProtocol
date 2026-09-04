@@ -62,6 +62,10 @@ internal class CommandContext : ITimeoutItem
 
     public TimeSpan? TimeSpan { get; set; }
 
+    public CancellationToken CancelToken { get; set; }
+
+    public CancellationTokenRegistration CancelRegistration { get; set; }
+
     public void SetNotificationHandle(uint handleIndex)
     {
         Volatile.Write(ref this.NotificationHandle, handleIndex);
@@ -75,6 +79,19 @@ internal class CommandContext : ITimeoutItem
     public void CommandCollides()
     {
         this.TryFinish(CommandFinishResult.Collided);
+    }
+
+    public void RegisterCancellation(CancellationToken cancellationToken)
+    {
+        this.CancelToken = cancellationToken;
+        if (cancellationToken.IsCancellationRequested)
+        {
+            this.TryFinish(CommandFinishResult.Cancelled);
+            return;
+        }
+
+        this.CancelRegistration = cancellationToken.Register(
+            () => this.TryFinish(CommandFinishResult.Cancelled));
     }
 
     // Complete the command with a business-layer failure without crashing worker threads.
@@ -184,6 +201,7 @@ internal class CommandContext : ITimeoutItem
 
     public void TryCleanupResources()
     {
+        this.CancelRegistration.Dispose();
         this.TryCleanupInFlight();
         this.TryCleanupNotificationHandle();
     }
@@ -219,6 +237,7 @@ internal class CommandContext : ITimeoutItem
     private void TryFinish(CommandFinishResult result, Exception? triggerException = null)
     {
         if (Interlocked.CompareExchange(ref this.FinishingGate, 1, 0) != 0) return;
+        this.CancelRegistration.Dispose();
         CoapLog.Info("CommandContext TryFinish");
 
         Exception? finishException = triggerException;
@@ -288,6 +307,9 @@ internal class CommandContext : ITimeoutItem
             case CommandFinishResult.Collided:
                 this.AckTaskSource.TrySetException(new InvalidOperationException($"Command Collided! Ack: {this.Command.AckVarName}"));
                 break;
+            case CommandFinishResult.Cancelled:
+                this.AckTaskSource.TrySetCanceled(this.CancelToken);
+                break;
         }
         
     }
@@ -311,5 +333,6 @@ internal enum CommandFinishResult
     Success,
     Timeout,
     Collided,
+    Cancelled,
 }
 }

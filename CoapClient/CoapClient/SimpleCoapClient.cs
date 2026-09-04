@@ -34,10 +34,15 @@ namespace CoapClient
         this.ThinAdsServer.Connect(amsNetId, amsPort);
     }
 
-    public Task<object> SendAndWaitAck(ICoapCommand command, TimeSpan? timeSpan = null)
+    public Task<object> SendAndWaitAck(ICoapCommand command, TimeSpan? timeSpan = null, CancellationToken cancellationToken = default)
     {
         try
         {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return Task.FromCanceled<object>(cancellationToken);
+            }
+
             CoapLog.Info($"<{command.AckVarName}> Enter SendAndWaitAckAsync");
             TimeSpan? effectiveTimeout = command.AckRequired ? timeSpan ?? command.Timeout : null;
 
@@ -49,13 +54,15 @@ namespace CoapClient
                 DeleteNotificationHandleAction = this.ThinAdsServer.AdsClient.DeleteDeviceNotification,
                 TimeoutAckReadAction = this.ReadAckBytesAsync,
             };
-        
+
             CoapLog.Info($"<{command.AckVarName}> CommandContext created");
 
             if (command.AckRequired && effectiveTimeout != null)
             {
                 this.TimeoutScheduler.ScheduleTimeout(commandContext);
             }
+
+            commandContext.RegisterCancellation(cancellationToken);
 
             //this.TryWriteCommandContext(commandContext);
             _ = this.RouteCommand(commandContext);

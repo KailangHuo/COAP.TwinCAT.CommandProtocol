@@ -100,6 +100,37 @@ object result = await client.SendAndWaitAck(
 3 秒后超时。
 ```
 
+## 取消（Cancellation）
+
+`SendAndWaitAck` 可接受一个可选的 `CancellationToken`。当 token 被触发时，命令 Task 会以取消状态完成，而不是继续等待 ACK 或超时。
+
+如果在调用 `SendAndWaitAck` 时 token 已经被取消，返回的 Task 会立刻取消，不会触碰 PLC。
+
+```csharp
+using System.Threading;
+using CoapClient;
+
+var client = new SimpleCoapClient();
+client.Connect("YOUR_AMS_NET_ID", 851);
+
+var write = new VariableWriteItem("PC_GVAR.DO_TO_POS", true);
+var ack = new AckPredicate<bool>("PC_GVAR.DI_AT_POS", PredicateType.Equals, true);
+var command = new CoapCommandItem(write, ack);
+
+using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+try
+{
+    object result = await client.SendAndWaitAck(command, cancellationToken: cts.Token);
+    Console.WriteLine($"命令完成: {result}");
+}
+catch (OperationCanceledException)
+{
+    Console.WriteLine("命令已取消。");
+}
+```
+
+取消是协作式的：CoapClient 会停止等待并注销 notification handle，但不会撤销已经发到 PLC 的 DO/AO 写入。
+
 ## 公开 API
 
 ### SimpleCoapClient
@@ -109,7 +140,7 @@ object result = await client.SendAndWaitAck(
 | 成员 | 说明 |
 |---|---|
 | `Connect(string amsNetId, int amsPort)` | 连接 TwinCAT ADS Server。 |
-| `Task<object> SendAndWaitAck(ICoapCommand command, TimeSpan? timeSpan = null)` | 发送命令，并返回一个在 ACK 满足、失败、冲突或超时时完成的 Task。 |
+| `Task<object> SendAndWaitAck(ICoapCommand command, TimeSpan? timeSpan = null, CancellationToken cancellationToken = default)` | 发送命令，并返回一个在 ACK 满足、失败、冲突、取消或超时时完成的 Task。 |
 | `object GetVariableValue(string varName)` | 直接读取 PLC 变量值。 |
 | `string GetServerStatusString()` | 读取 ADS Server 状态字符串。 |
 
@@ -202,6 +233,7 @@ IAck ack = new AckPredicate<int>(
 | Success | ACK predicate 已满足。 |
 | Timeout | 超时前 ACK 未满足，包括最后一次主动读取后仍未满足。 |
 | Collided | 已有其他命令正在使用同一个 ACK 变量。 |
+| Cancelled | 命令通过 `CancellationToken` 被取消。 |
 
 同一时间只有一个 in-flight 命令可以使用同一个 ACK 变量。这样可以避免 notification 归属不明确。
 

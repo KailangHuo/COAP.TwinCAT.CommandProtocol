@@ -33,3 +33,15 @@ for (int i = 0; i < 1000; i++)
     var _result = (bool)await client.SendAndWaitAck(doFalseCommand);
     Console.WriteLine($"{diName} has modified to {_result}");
 }
+
+// Cancellation demo: cancel the wait instead of waiting for a timeout.
+using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+try
+{
+    object cancelledResult = await client.SendAndWaitAck(doTrueCommand, cancellationToken: cts.Token);
+    Console.WriteLine($"Command completed: {cancelledResult}");
+}
+catch (OperationCanceledException)
+{
+    Console.WriteLine("Command was cancelled as expected.");
+}

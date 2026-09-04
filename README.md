@@ -100,6 +100,37 @@ Complete the command when PC_GVAR.DI_AT_POS == true.
 Timeout after 3 seconds.
 ```
 
+## Cancellation
+
+`SendAndWaitAck` accepts an optional `CancellationToken`. When the token is signalled, the command task completes as cancelled instead of waiting for the ACK or the timeout.
+
+If the token is already cancelled when `SendAndWaitAck` is called, the returned task is cancelled immediately without touching the PLC.
+
+```csharp
+using System.Threading;
+using CoapClient;
+
+var client = new SimpleCoapClient();
+client.Connect("YOUR_AMS_NET_ID", 851);
+
+var write = new VariableWriteItem("PC_GVAR.DO_TO_POS", true);
+var ack = new AckPredicate<bool>("PC_GVAR.DI_AT_POS", PredicateType.Equals, true);
+var command = new CoapCommandItem(write, ack);
+
+using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+try
+{
+    object result = await client.SendAndWaitAck(command, cancellationToken: cts.Token);
+    Console.WriteLine($"Command completed: {result}");
+}
+catch (OperationCanceledException)
+{
+    Console.WriteLine("Command was cancelled.");
+}
+```
+
+Cancellation is cooperative: CoapClient stops waiting and unregisters the notification handle, but it does not undo the DO/AO write already sent to the PLC.
+
 ## Public API
 
 ### SimpleCoapClient
@@ -109,7 +140,7 @@ Main entry point for callers.
 | Member | Description |
 |---|---|
 | `Connect(string amsNetId, int amsPort)` | Connects to the TwinCAT ADS server. |
-| `Task<object> SendAndWaitAck(ICoapCommand command, TimeSpan? timeSpan = null)` | Sends a command and returns a task that completes when the ACK is satisfied, fails, collides, or times out. |
+| `Task<object> SendAndWaitAck(ICoapCommand command, TimeSpan? timeSpan = null, CancellationToken cancellationToken = default)` | Sends a command and returns a task that completes when the ACK is satisfied, fails, collides, is cancelled, or times out. |
 | `object GetVariableValue(string varName)` | Reads a PLC variable value directly. |
 | `string GetServerStatusString()` | Reads the ADS server state as a string. |
 
@@ -202,6 +233,7 @@ Internally, a command moves through these states:
 | Success | The ACK predicate matched. |
 | Timeout | The ACK did not match before timeout, including the final active read. |
 | Collided | Another command is already using the same ACK variable. |
+| Cancelled | The command was cancelled via a `CancellationToken`. |
 
 Only one in-flight command can use the same ACK variable at the same time. This avoids ambiguous notification ownership.
 
