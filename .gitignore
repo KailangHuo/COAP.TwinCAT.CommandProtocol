@@ -2,6 +2,11 @@
 [Bb]in/
 [Oo]bj/
 
+# Packed packages
+*.nupkg
+*.snupkg
+nupkg-out/
+
 # IDE user-specific settings (Rider / ReSharper / Visual Studio)
 *.DotSettings.user
 .vs/
