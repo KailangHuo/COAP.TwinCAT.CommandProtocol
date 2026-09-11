@@ -1,5 +1,11 @@
-# IDE user-specific settings (Rider / ReSharper)
+# Build output
+[Bb]in/
+[Oo]bj/
+
+# IDE user-specific settings (Rider / ReSharper / Visual Studio)
 *.DotSettings.user
+.vs/
 
 # Runtime logs
 **/Logs/
+*.log
