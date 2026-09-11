@@ -1049,10 +1049,10 @@
     "C:\\Users\\sizones41\\.nuget\\packages\\": {}
   },
   "project": {
-    "version": "1.0.0",
+    "version": "0.1.0",
     "restore": {
       "projectUniqueName": "D:\\System\\Document\\GitHub\\COAP\\CoapClient\\CoapClient\\CoapClient.csproj",
-      "projectName": "CoapClient",
+      "projectName": "COAP.TwinCAT.CommandProtocol",
       "projectPath": "D:\\System\\Document\\GitHub\\COAP\\CoapClient\\CoapClient\\CoapClient.csproj",
       "packagesPath": "C:\\Users\\sizones41\\.nuget\\packages\\",
       "outputPath": "D:\\System\\Document\\GitHub\\COAP\\CoapClient\\CoapClient\\obj\\",

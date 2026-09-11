@@ -141,6 +141,7 @@ Main entry point for callers.
 |---|---|
 | `Connect(string amsNetId, int amsPort)` | Connects to the TwinCAT ADS server. |
 | `Task<object> SendAndWaitAck(ICoapCommand command, TimeSpan? timeSpan = null, CancellationToken cancellationToken = default)` | Sends a command and returns a task that completes when the ACK is satisfied, fails, collides, is cancelled, or times out. |
+| `bool VariableExists(string varName)` | Checks whether a PLC variable exists, using the locally cached symbol table. No ADS round trip. |
 | `object GetVariableValue(string varName)` | Reads a PLC variable value directly. |
 | `object[] GetSumVariableValue(string[] varNames)` | Reads several PLC variable values in a single ADS sum read; the result aligns with `varNames`. |
 | `string GetServerStatusString()` | Reads the ADS server state as a string. |
@@ -152,6 +153,35 @@ object[] values = client.GetSumVariableValue(
     new[] { "PC_GVAR.DI_AT_POS", "PC_GVAR.AI_PRESSURE" });
 bool atPos = (bool)values[0];
 ```
+
+### Checking whether a variable exists
+
+`VariableExists` answers whether a variable name is known to the PLC, using only the
+locally cached symbol table — no ADS round trip per call. Check as many names as needed
+by calling it repeatedly.
+
+```csharp
+if (!client.VariableExists("PC_GVAR.DO_TO_POS"))
+{
+    Console.WriteLine("Variable is not part of the current PLC project.");
+}
+```
+
+Behavior and constraints:
+
+| Case | Result |
+|---|---|
+| Variable exists in the loaded symbol table | `true` |
+| Variable does not exist | `false` |
+| `varName` is null, empty, or whitespace | throws `ArgumentException` |
+| `Connect` has not been called | throws `InvalidOperationException` |
+
+The symbol table is loaded during `Connect` and is **not refreshed automatically**. After
+the PLC application is re-downloaded, call `Connect` again before relying on this check —
+otherwise a stale table can report a variable that no longer exists.
+
+Because the table is lazily loaded, the first lookup after `Connect` may still trigger one
+device transfer; subsequent lookups are served from the local cache.
 
 ### VariableWriteItem
 

@@ -63,6 +63,22 @@ namespace CoapClient
             return symbol;
         }
 
+        /// <summary>
+        /// Checks the locally cached symbol table for the given instance path.
+        /// No ADS round trip is performed.
+        /// </summary>
+        public bool VariableExists(string varName)
+        {
+            if (string.IsNullOrWhiteSpace(varName))
+                throw new ArgumentException("Variable name is null or empty.", nameof(varName));
+
+            if (this.SymbolCollection == null)
+                throw new InvalidOperationException(
+                    "The ADS symbol table has not been loaded. Call Connect() before querying variables.");
+
+            return this.SymbolCollection.Contains(varName);
+        }
+
         public void SendCommand(VariableWriteItem variableWriteItem)
         {
             string varName = variableWriteItem.VarName;

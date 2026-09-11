@@ -151,6 +151,27 @@ namespace CoapClient
         return buffer;
     }
     
+    /// <summary>
+    /// Checks whether the given PLC variable exists in the locally cached symbol table.
+    /// This is a local lookup only; no ADS round trip is performed.
+    /// The cache is loaded by <see cref="Connect"/> and is not refreshed automatically,
+    /// so re-connect after the PLC application is re-downloaded.
+    /// </summary>
+    /// <exception cref="ArgumentException">The variable name is null, empty, or whitespace.</exception>
+    /// <exception cref="InvalidOperationException">Not connected yet; the symbol table has not been loaded.</exception>
+    public bool VariableExists(string varName)
+    {
+        try
+        {
+            return this.ThinAdsServer.VariableExists(varName);
+        }
+        catch (Exception e)
+        {
+            CoapLog.Error(e.ToString());
+            throw;
+        }
+    }
+
     public object GetVariableValue(string varName)
     {
         try

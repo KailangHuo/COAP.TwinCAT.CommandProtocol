@@ -1,0 +1,5 @@
+# IDE user-specific settings (Rider / ReSharper)
+*.DotSettings.user
+
+# Runtime logs
+**/Logs/

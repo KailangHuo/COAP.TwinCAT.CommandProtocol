@@ -5,10 +5,10 @@
   },
   "projects": {
     "D:\\System\\Document\\GitHub\\COAP\\CoapClient\\CoapClient\\CoapClient.csproj": {
-      "version": "1.0.0",
+      "version": "0.1.0",
       "restore": {
         "projectUniqueName": "D:\\System\\Document\\GitHub\\COAP\\CoapClient\\CoapClient\\CoapClient.csproj",
-        "projectName": "CoapClient",
+        "projectName": "COAP.TwinCAT.CommandProtocol",
         "projectPath": "D:\\System\\Document\\GitHub\\COAP\\CoapClient\\CoapClient\\CoapClient.csproj",
         "packagesPath": "C:\\Users\\sizones41\\.nuget\\packages\\",
         "outputPath": "D:\\System\\Document\\GitHub\\COAP\\CoapClient\\CoapClient\\obj\\",
@@ -116,6 +116,12 @@
       "frameworks": {
         "net8.0": {
           "targetAlias": "net8.0",
+          "dependencies": {
+            "PLC_VarToEnumGenerator": {
+              "target": "Package",
+              "version": "[1.0.0, )"
+            }
+          },
           "imports": [
             "net461",
             "net462",

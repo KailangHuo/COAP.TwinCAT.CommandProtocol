@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("CoapTestConsole")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+f057efb710ac93009757f37460bedff4506c2ad2")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+632ee90abe19dd9ebb1f9a29da24cd102667dcc8")]
 [assembly: System.Reflection.AssemblyProductAttribute("CoapTestConsole")]
 [assembly: System.Reflection.AssemblyTitleAttribute("CoapTestConsole")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

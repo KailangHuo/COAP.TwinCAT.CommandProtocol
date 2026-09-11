@@ -213,6 +213,12 @@
           "lib/netstandard1.0/_._": {}
         }
       },
+      "PLC_VarToEnumGenerator/1.0.0": {
+        "type": "package",
+        "build": {
+          "buildTransitive/PLC_VarToEnumGenerator.props": {}
+        }
+      },
       "System.ComponentModel.Composition/8.0.0": {
         "type": "package",
         "compile": {
@@ -387,7 +393,7 @@
           }
         }
       },
-      "CoapClient/1.0.0": {
+      "COAP.TwinCAT.CommandProtocol/0.1.0": {
         "type": "project",
         "framework": ".NETCoreApp,Version=v8.0",
         "dependencies": {
@@ -395,10 +401,10 @@
           "log4net": "3.3.2"
         },
         "compile": {
-          "bin/placeholder/CoapClient.dll": {}
+          "bin/placeholder/COAP.TwinCAT.CommandProtocol.dll": {}
         },
         "runtime": {
-          "bin/placeholder/CoapClient.dll": {}
+          "bin/placeholder/COAP.TwinCAT.CommandProtocol.dll": {}
         }
       }
     }
@@ -756,6 +762,19 @@
         "version.txt"
       ]
     },
+    "PLC_VarToEnumGenerator/1.0.0": {
+      "sha512": "KlXRKCje2P/nw1I9duifiuJzCDHxQiksVkYeWHA056MYJPmRMFPHBQmryqKoO1HvXdjkgfN9E3HPKPfCiLJfuQ==",
+      "type": "package",
+      "path": "plc_vartoenumgenerator/1.0.0",
+      "files": [
+        ".nupkg.metadata",
+        "README.md",
+        "analyzers/dotnet/cs/PLC_VarToEnumGenerator.dll",
+        "buildTransitive/PLC_VarToEnumGenerator.props",
+        "plc_vartoenumgenerator.1.0.0.nupkg.sha512",
+        "plc_vartoenumgenerator.nuspec"
+      ]
+    },
     "System.ComponentModel.Composition/8.0.0": {
       "sha512": "bGhUX5BTivJ9Wax0qnJy7uGq7dn/TQkEpJ2Fpu1etg8dbPwyDkUzNPc1d3I2/jUr9y4wDI3a1dkSmi8X21Pzbw==",
       "type": "package",
@@ -1052,7 +1071,7 @@
         "useSharedDesignerContext.txt"
       ]
     },
-    "CoapClient/1.0.0": {
+    "COAP.TwinCAT.CommandProtocol/0.1.0": {
       "type": "project",
       "path": "../CoapClient/CoapClient.csproj",
       "msbuildProject": "../CoapClient/CoapClient.csproj"
@@ -1060,7 +1079,8 @@
   },
   "projectFileDependencyGroups": {
     "net8.0": [
-      "CoapClient >= 1.0.0"
+      "COAP.TwinCAT.CommandProtocol >= 0.1.0",
+      "PLC_VarToEnumGenerator >= 1.0.0"
     ]
   },
   "packageFolders": {
@@ -1109,6 +1129,12 @@
     "frameworks": {
       "net8.0": {
         "targetAlias": "net8.0",
+        "dependencies": {
+          "PLC_VarToEnumGenerator": {
+            "target": "Package",
+            "version": "[1.0.0, )"
+          }
+        },
         "imports": [
           "net461",
           "net462",

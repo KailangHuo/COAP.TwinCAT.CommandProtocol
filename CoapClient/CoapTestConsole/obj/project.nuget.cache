@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "dgSpecHash": "c4yXSmldop0=",
+  "dgSpecHash": "Ps5nOLQuOVQ=",
   "success": true,
   "projectFilePath": "D:\\System\\Document\\GitHub\\COAP\\CoapClient\\CoapTestConsole\\CoapTestConsole.csproj",
   "expectedPackageFiles": [
@@ -16,6 +16,7 @@
     "C:\\Users\\sizones41\\.nuget\\packages\\microsoft.extensions.logging.abstractions\\8.0.3\\microsoft.extensions.logging.abstractions.8.0.3.nupkg.sha512",
     "C:\\Users\\sizones41\\.nuget\\packages\\microsoft.extensions.primitives\\8.0.0\\microsoft.extensions.primitives.8.0.0.nupkg.sha512",
     "C:\\Users\\sizones41\\.nuget\\packages\\microsoft.netcore.platforms\\2.0.0\\microsoft.netcore.platforms.2.0.0.nupkg.sha512",
+    "C:\\Users\\sizones41\\.nuget\\packages\\plc_vartoenumgenerator\\1.0.0\\plc_vartoenumgenerator.1.0.0.nupkg.sha512",
     "C:\\Users\\sizones41\\.nuget\\packages\\system.componentmodel.composition\\8.0.0\\system.componentmodel.composition.8.0.0.nupkg.sha512",
     "C:\\Users\\sizones41\\.nuget\\packages\\system.configuration.configurationmanager\\4.5.0\\system.configuration.configurationmanager.4.5.0.nupkg.sha512",
     "C:\\Users\\sizones41\\.nuget\\packages\\system.diagnostics.eventlog\\8.0.1\\system.diagnostics.eventlog.8.0.1.nupkg.sha512",
@@ -24,7 +25,8 @@
     "C:\\Users\\sizones41\\.nuget\\packages\\system.security.cryptography.protecteddata\\4.5.0\\system.security.cryptography.protecteddata.4.5.0.nupkg.sha512",
     "C:\\Users\\sizones41\\.nuget\\packages\\system.security.permissions\\4.5.0\\system.security.permissions.4.5.0.nupkg.sha512",
     "C:\\Users\\sizones41\\.nuget\\packages\\system.security.principal.windows\\4.5.0\\system.security.principal.windows.4.5.0.nupkg.sha512",
-    "C:\\Users\\sizones41\\.nuget\\packages\\system.serviceprocess.servicecontroller\\8.0.1\\system.serviceprocess.servicecontroller.8.0.1.nupkg.sha512"
+    "C:\\Users\\sizones41\\.nuget\\packages\\system.serviceprocess.servicecontroller\\8.0.1\\system.serviceprocess.servicecontroller.8.0.1.nupkg.sha512",
+    "C:\\Users\\sizones41\\.nuget\\packages\\coap.twincat.commandprotocol\\0.1.0\\coap.twincat.commandprotocol.0.1.0.nupkg.sha512"
   ],
   "logs": []
 }

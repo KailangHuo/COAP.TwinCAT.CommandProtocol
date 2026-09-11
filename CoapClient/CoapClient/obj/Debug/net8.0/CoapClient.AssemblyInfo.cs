@@ -10,13 +10,15 @@
 using System;
 using System.Reflection;
 
-[assembly: System.Reflection.AssemblyCompanyAttribute("CoapClient")]
+[assembly: System.Reflection.AssemblyCompanyAttribute("KailangHuo")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
-[assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+f057efb710ac93009757f37460bedff4506c2ad2")]
+[assembly: System.Reflection.AssemblyDescriptionAttribute("Command-oriented C# middleware for Beckhoff TwinCAT ADS workflows.")]
+[assembly: System.Reflection.AssemblyFileVersionAttribute("0.1.0.0")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("0.1.0+632ee90abe19dd9ebb1f9a29da24cd102667dcc8")]
 [assembly: System.Reflection.AssemblyProductAttribute("CoapClient")]
 [assembly: System.Reflection.AssemblyTitleAttribute("CoapClient")]
-[assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
+[assembly: System.Reflection.AssemblyVersionAttribute("0.1.0.0")]
+[assembly: System.Reflection.AssemblyMetadataAttribute("RepositoryUrl", "https://github.com/KailangHuo/TwinCAT.CommandProtocol.COAP.git")]
 
 // 由 MSBuild WriteCodeFragment 类生成。
 
