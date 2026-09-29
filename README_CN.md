@@ -100,6 +100,22 @@ object result = await client.SendAndWaitAck(
 3 秒后超时。
 ```
 
+## 超时
+
+每个需要 ACK 的命令都有超时。取值顺序如下：
+
+```text
+1. 传给 SendAndWaitAck 的 timeSpan 参数
+2. ICoapCommand.Timeout（命令自身提供的超时）
+3. SimpleCoapClient.DefaultAckTimeout —— 当前为 1 分钟
+```
+
+第三步很关键：`CoapCommandItem` 与 `CoapSumCommandItem` **不会**填充 `ICoapCommand.Timeout`，
+所以省略 `timeSpan` 时会落到 `DefaultAckTimeout`。如果需要别的上限，要么显式传 `timeSpan`，
+要么继承 `AbstractCoapCommand` 并在自己的构造函数里设置 `Timeout`。
+
+不需要 ACK 的命令（`AckRequired == false`）不会安排超时 —— 写命令下发后即完成。
+
 ## 取消（Cancellation）
 
 `SendAndWaitAck` 可接受一个可选的 `CancellationToken`。当 token 被触发时，命令 Task 会以取消状态完成，而不是继续等待 ACK 或超时。
@@ -129,7 +145,10 @@ catch (OperationCanceledException)
 }
 ```
 
-取消是协作式的：CoapClient 会停止等待并注销 notification handle，但不会撤销已经发到 PLC 的 DO/AO 写入。
+取消是协作式的：CoapClient 会停止等待并清理 notification handle，但**不会**撤销已经下发给 PLC 的 DO/AO 写入。
+
+注意这个例子靠 `CancellationTokenSource` 来限制等待时间 —— 它没有传 `timeSpan`。如果没有这个
+token，命令会等到 `DefaultAckTimeout` 才超时。
 
 ## 公开 API
 
@@ -139,19 +158,49 @@ catch (OperationCanceledException)
 
 | 成员 | 说明 |
 |---|---|
-| `Connect(string amsNetId, int amsPort)` | 连接 TwinCAT ADS Server。 |
-| `Task<object> SendAndWaitAck(ICoapCommand command, TimeSpan? timeSpan = null, CancellationToken cancellationToken = default)` | 发送命令，并返回一个在 ACK 满足、失败、冲突、取消或超时时完成的 Task。 |
-| `object GetVariableValue(string varName)` | 直接读取 PLC 变量值。 |
-| `object[] GetSumVariableValue(string[] varNames)` | 通过一次 ADS 批量读取读取多个 PLC 变量值，返回顺序与 `varNames` 一致。 |
-| `string GetServerStatusString()` | 读取 ADS Server 状态字符串。 |
+| `Connect(string amsNetId, int amsPort)` | 连接 TwinCAT ADS Server，并加载符号表。 |
+| `Task<object> SendAndWaitAck(ICoapCommand command, TimeSpan? timeSpan = null, CancellationToken cancellationToken = default)` | 下发命令，返回的 Task 在 ACK 满足、失败、冲突、取消或超时时完成。 |
+| `bool VariableExists(string varName)` | 用本地缓存的符号表判断变量是否存在，不走 ADS 往返。 |
+| `object GetVariableValue(string varName)` | 直接读取一个 PLC 变量。 |
+| `object[] GetSumVariableValue(string[] varNames)` | 用一次 ADS sum 读批量读取多个变量，返回值与 `varNames` 顺序对齐。 |
+| `string GetServerStatusString()` | 读取 ADS Server 状态（字符串形式）。 |
+| `static readonly TimeSpan DefaultAckTimeout` | ACK 超时的兜底值，当前为 1 分钟。见[超时](#超时)。 |
 
-一次 ADS 往返批量读取多个变量：
+参数校验：`command` 为 `null` 时抛 `ArgumentNullException`；命令需要 ACK 但 `AckVarName`
+为空时抛 `ArgumentException`。两者都在**取消检查之前**抛出 —— 即使 token 已被取消，
+非法命令也会立刻报错。
+
+一次往返批量读取：
 
 ```csharp
 object[] values = client.GetSumVariableValue(
     new[] { "PC_GVAR.DI_AT_POS", "PC_GVAR.AI_PRESSURE" });
 bool atPos = (bool)values[0];
 ```
+
+### 检查变量是否存在
+
+`VariableExists` 只查本地缓存的符号表来判断变量名是否为 PLC 所知 ——
+每次调用都不产生 ADS 往返。可以对任意多个名字反复调用。
+
+```csharp
+if (!client.VariableExists("PC_GVAR.DO_TO_POS"))
+{
+    Console.WriteLine("该变量不在当前 PLC 工程中。");
+}
+```
+
+行为与约束：
+
+| 情况 | 结果 |
+|---|---|
+| 变量存在于已加载的符号表 | `true` |
+| 变量不存在 | `false` |
+| `varName` 为 null、空或纯空白 | 抛 `ArgumentException` |
+| 尚未调用 `Connect` | 抛 `CoapNotConnectedException` |
+
+符号表在 `Connect` 时加载，**不会自动刷新**。PLC 程序重新下载后，请重新 `Connect`
+再依赖此检查 —— 否则过期的符号表可能报告一个已经不存在的变量。
 
 ### VariableWriteItem
 
@@ -166,17 +215,73 @@ var item = new VariableWriteItem("PC_GVAR.DO_TO_POS", true);
 | `VarName` | 要写入的 PLC 变量名。 |
 | `Value` | 要写入的值。 |
 
-### CoapCommandItem
+### ICoapCommand
 
-表示单变量写入命令。
+`SendAndWaitAck` 所操作的契约。可以直接实现，但更推荐继承 `AbstractCoapCommand`（见下）。
+
+| 成员 | 说明 |
+|---|---|
+| `bool AckRequired` | 为 `false` 时命令是「发了不管」：写命令下发后 Task 立即完成，不注册 notification、不校验 ACK、也没有超时。 |
+| `string AckVarName` | 用于观察结果的 DI/AI 变量。`AckRequired` 为 `true` 时必填。 |
+| `int CycleTime` | ADS Server 采样 ACK 变量变化的时间间隔，单位**毫秒**。会传给 `NotificationSettings`。 |
+| `int MaxDelayTime` | 传给 `NotificationSettings` 的最大延迟，单位**毫秒**。`0` 表示关闭该机制。 |
+| `TimeSpan? Timeout` | 可选的命令级 ACK 超时。当 `SendAndWaitAck` 未传 `timeSpan` 时生效。 |
+| `Type ValueType` | 声明的类型信息。目前类库既不填充也不读取 —— 视为未使用。 |
+| `bool ValidateAck(byte[] rawAckData)` | 判断原始 ACK 字节是否满足命令条件。 |
+| `object GetResult(byte[] rawData)` | 把原始 ACK 字节转换成 `SendAndWaitAck` 返回的对象。 |
+
+> 这里的 `CycleTime` 与 `MaxDelayTime` 单位是**毫秒**，因为对应的是
+> `NotificationSettings(AdsTransMode, int, int)` 重载。而原始 ADS 协议
+> （`AdsNotificationAttrib`）用的是 100 ns 单位 —— 不要把两边的数值直接照搬。
+
+### AbstractCoapCommand
+
+自定义命令的基类。它实现了 `ICoapCommand`，并把 ACK 处理委托给一个 `IAck` 实例，
+所以派生类只需要提供数据和各属性。
 
 ```csharp
-var command = new CoapCommandItem(writeItem, ack);
+public class MyCommand : AbstractCoapCommand
+{
+    public MyCommand(VariableWriteItem write, IAck ack)
+    {
+        this.WriteItem = write;
+        this.AckPredicate = ack;
+        this.AckRequired = true;
+        this.AckVarName = ack.AckVarName;
+        this.CycleTime = 2;
+        this.MaxDelayTime = 0;
+        this.Timeout = TimeSpan.FromSeconds(5);   // protected set
+    }
+
+    public VariableWriteItem WriteItem { get; }
+}
 ```
+
+| 成员 | 说明 |
+|---|---|
+| `AckPredicate` | `ValidateAck` / `GetResult` 使用的 `IAck`。 |
+| `AckRequired`、`CycleTime`、`MaxDelayTime`、`AckVarName`、`Timeout` | 均为 `protected set`，派生类可赋值。 |
+| `ValidateAck(byte[])` | `AckRequired` 为 `false` 时返回 `true`；否则委托给 `AckPredicate.IsMatched`。 |
+| `GetResult(byte[])` | `AckRequired` 为 `false` 时返回 `true`；否则委托给 `AckPredicate.GetResultWithType`。 |
+
+### CoapCommandItem
+
+单变量命令，派生自 `AbstractCoapCommand`。
+
+```csharp
+// 省略 ack（或传 null）=> AckRequired 保持 false => 发了不管
+var command = new CoapCommandItem(writeItem);
+
+// 带 ACK；cycleTime 默认 2 ms
+var command = new CoapCommandItem(writeItem, ack);
+var command = new CoapCommandItem(writeItem, ack, cycleTime: 10);
+```
+
+`ack` 传 `null` 是受支持的「只写不等结果」用法。
 
 ### CoapSumCommandItem
 
-表示多变量写入命令。
+多变量写命令，通过 ADS sum 写下发。
 
 ```csharp
 var command = new CoapSumCommandItem(
@@ -188,21 +293,25 @@ var command = new CoapSumCommandItem(
     ack);
 ```
 
+构造函数形式与 `CoapCommandItem` 相同，含可选的 `cycleTime`。
+
+写入的变量必须互不相同 —— 出现重复变量会在下发时抛 `InvalidOperationException`。
+
 ### IAck
 
-定义命令结果如何被检查。
+定义命令结果如何校验。
 
 | 成员 | 说明 |
 |---|---|
-| `string AckVarName` | 作为命令结果的 PLC DI/AI 变量名。 |
-| `bool IsMatched(byte[] rawData)` | 判断原始 ACK 数据是否满足条件。 |
-| `object GetResultWithType(byte[] rawData)` | 将原始 ACK 字节转换为对应类型的结果。 |
+| `string AckVarName` | 用作命令结果的 PLC DI/AI 变量。 |
+| `bool IsMatched(byte[] rawData)` | 返回原始 ACK 值是否满足条件。 |
+| `object GetResultWithType(byte[] rawData)` | 把原始 ACK 字节转换成有类型的返回值。 |
 
-当内置 predicate 模型不足以表达业务条件时，可以自行实现 `IAck`。
+当内置 predicate 模型不够用时，实现 `IAck`。
 
 ### AckPredicate<T>
 
-内置 ACK 实现，适用于 unmanaged value type。
+内置的 ACK 实现，适用于 unmanaged 值类型。
 
 ```csharp
 IAck ack = new AckPredicate<bool>(
@@ -211,7 +320,7 @@ IAck ack = new AckPredicate<bool>(
     true);
 ```
 
-也可以提供自定义 predicate：
+也可以传入自定义 predicate：
 
 ```csharp
 IAck ack = new AckPredicate<int>(
@@ -224,54 +333,152 @@ IAck ack = new AckPredicate<int>(
 
 | PredicateType | 含义 | 参数 |
 |---|---|---|
-| `Equals` | ACK 值等于目标值 | `arg1` |
-| `NotEquals` | ACK 值不等于目标值 | `arg1` |
-| `GreaterOrEqual` | ACK 值大于等于目标值 | `arg1` |
-| `LessOrEqual` | ACK 值小于等于目标值 | `arg1` |
-| `InBetween` | ACK 值在闭区间内 | `arg1`, `arg2` |
+| `Equals` | ACK 值等于预期值 | `arg1` |
+| `NotEquals` | ACK 值不等于预期值 | `arg1` |
+| `GreaterOrEqual` | ACK 值大于等于预期值 | `arg1` |
+| `LessOrEqual` | ACK 值小于等于预期值 | `arg1` |
+| `InBetween` | ACK 值落在闭区间内 | `arg1`、`arg2` |
+
+三个排序类 predicate 要求 ACK 值类型支持比较；对不支持比较的值类型使用它们会抛
+`InvalidOperationException`。
 
 ## 命令生命周期
 
-在内部，一个命令会经历以下状态：
+内部而言，一条命令会经历以下状态：
 
 | 状态 | 含义 |
 |---|---|
-| Queued | 命令已被接收，但尚未派发。 |
-| HandShakeSent | ACK notification 路径正在建立。 |
-| Dispatched | DO/AO 写入已经发送到 PLC。 |
-| Success | ACK predicate 已满足。 |
-| Timeout | 超时前 ACK 未满足，包括最后一次主动读取后仍未满足。 |
-| Collided | 已有其他命令正在使用同一个 ACK 变量。 |
+| Queued | 命令已被接受，尚未下发。 |
+| HandShakeSent | 正在建立 ACK notification 路径。 |
+| Dispatched | DO/AO 写命令已下发到 PLC。 |
+| Success | ACK predicate 匹配。 |
+| Timeout | 超时前 ACK 未匹配，包含最后一次主动读取。 |
+| Collided | 同一 ACK 变量上已有其它命令在使用。 |
 | Cancelled | 命令通过 `CancellationToken` 被取消。 |
 
-同一时间只有一个 in-flight 命令可以使用同一个 ACK 变量。这样可以避免 notification 归属不明确。
+同一时刻，同一个 ACK 变量只能有一条在途命令。这避免了 notification 归属的歧义。
+
+## 异常
+
+`SendAndWaitAck` 通过返回的 Task 报告所有终态 —— 要么是 ACK 值，要么是下列异常之一。
+注意有少数失败是**同步抛出**的（在下表中单独说明）。
+
+| 异常 | 含义 |
+|---|---|
+| `TimeoutException` | 超时前 ACK predicate 未被满足。消息里带最后一次已知值。 |
+| `CoapCommandCollisionException` | 该 ACK 变量已被另一条命令占用。带 `AckVarName`。 |
+| `OperationCanceledException`（实际为 `TaskCanceledException`）| 命令通过 `CancellationToken` 取消。 |
+| `CoapResultConversionException` | **命令已成功，但 Task 仍然 faulted。** 见下。 |
+| `CoapSymbolNotFoundException` | 变量不在已加载的符号表中。带 `VarName`。 |
+| `CoapNotConnectedException` | 尚未调用 `Connect`。 |
+| ADS 异常（`AdsErrorException` 等）| 由底层 `Beckhoff.TwinCAT.Ads` 层原样抛出。 |
+
+同步抛出：
+
+- `SendAndWaitAck` 传入 `null` 命令 → `ArgumentNullException`。
+- `SendAndWaitAck` 传入需要 ACK 但 `AckVarName` 为空的命令 → `ArgumentException`。
+- `Connect` 原样重抛 ADS 层报出的异常。
+
+### `CoapResultConversionException` —— 不要盲目重试
+
+这是唯一一个表示命令**已经成功**的异常。ACK predicate 已满足，PLC 侧动作**已经发生** ——
+但随后 `ICoapCommand.GetResult` 在把原始 ACK 字节转换成结果对象时抛了异常。
+
+如果调用方把它当命令失败处理并重新下发写入，PLC 动作会**被执行第二次**。
+应该改用 `RawAckData`（PLC 实际报出的字节）和 `InnerException`（`GetResult` 抛出的原因）来排查。
+
+```csharp
+try
+{
+    object result = await client.SendAndWaitAck(command);
+}
+catch (CoapResultConversionException ex)
+{
+    // PLC 动作已经发生了。先排查，不要盲目重试。
+    Console.WriteLine($"ACK 已满足（{ex.AckVarName}），但结果解析失败。");
+    Console.WriteLine($"原始 ACK 字节: {Convert.ToHexString(ex.RawAckData ?? Array.Empty<byte>())}");
+    Console.WriteLine($"原因: {ex.InnerException?.Message}");
+}
+catch (CoapCommandCollisionException ex)
+{
+    Console.WriteLine($"{ex.AckVarName} 上已有命令在途。");
+}
+catch (CoapSymbolNotFoundException ex)
+{
+    Console.WriteLine($"{ex.VarName} 不在当前 PLC 工程中。");
+}
+catch (CoapNotConnectedException)
+{
+    Console.WriteLine("请先调用 Connect()。");
+}
+```
+
+### 向后兼容
+
+`CoapCommandCollisionException`、`CoapSymbolNotFoundException`、`CoapNotConnectedException`
+都继承自 `InvalidOperationException`，因此按旧版本写法捕获 `InvalidOperationException` 的
+调用方仍然可用。但新代码应优先捕获具体类型 —— 只用基类型无法区分这几种情况。
+
+## 日志
+
+类库通过 **log4net** 输出日志，使用独立的 repository 与 logger：
+
+```text
+repository : CoapProjectRepository
+logger     : [COAP]
+```
+
+repository 在内部完成配置，因此无需额外添加 log4net 配置即可看到日志。`Connect`、命令下发、
+ACK 校验、handle 清理、超时处理都会写日志；失败会在异常抛出前先记录。
+
+## 并发
+
+- **不同的 ACK 变量**可以并发使用。每条命令持有自己的 notification handle，通知回调线程把
+  工作交给单一消费者队列，因此不同命令的 ACK 处理是串行的，不会交错。
+- **同一个 ACK 变量**不能有两条在途命令。第二条会立刻以 `CoapCommandCollisionException` 失败。
+- 不带 ACK 的命令通过串行化的 sender 下发。
+
+## 生命周期
+
+`SimpleCoapClient` **目前尚未**实现 `IDisposable`，也没有 `Disconnect`。底层 ADS 连接会随实例
+一直持有。因此请**每个应用创建一个 client 并复用**，不要按命令创建 ——
+反复创建会泄漏 ADS 连接与句柄，而 TwinCAT 的句柄总数上限约 8191。
+
+对应的工作项记录在 `CoapTestConsole/Issue.md`。
 
 ## 项目结构
 
+路径均相对仓库根目录。
+
 | 路径 | 用途 |
 |---|---|
-| `CoapClient/` | 类库源码。 |
-| `CoapTestConsole/` | 用于手动实验的小型控制台项目。 |
-| `CoapClient/BRIEF.md` | 维护者对项目意图的说明。 |
+| `CoapClient/CoapClient/` | 类库源码。 |
+| `CoapClient/CoapTestConsole/` | 用于手工实验的控制台工程。 |
+| `CoapClient/BRIEF.md` | 维护者说明，描述项目意图。 |
+| `CoapClient/CoapTestConsole/Issue.md` | 已知未决缺陷。 |
+| `CoapClient/CoapTestConsole/CoapClient_KnownIssues.md` | 异常语义上的坑，供下游使用方参考。 |
 
-重要内部组件：
+重要的内部组件：
 
 | 组件 | 职责 |
 |---|---|
-| `ThinAdsServer` | 封装 TwinCAT ADS 连接、符号查找、读、写和 notification。 |
-| `CommandContext` | 保存单个命令的生命周期和完成状态。 |
-| `CommandSender` | 串行化命令派发。 |
-| `CommandHandler` | 处理 ADS notification，并路由到对应命令上下文。 |
+| `ThinAdsServer` | 封装 TwinCAT ADS 连接、符号查找、读写与 notification。 |
+| `CommandContext` | 承载单条命令的生命周期与完成状态。 |
+| `CommandSender` | 串行化命令下发。 |
+| `CommandHandler` | 处理 ADS notification 并路由到对应的 command context。 |
 | `CommandInFlightManager` | 防止 ACK 变量冲突。 |
 | `TimeoutScheduler` | 调度命令超时回调。 |
+
+`SingleConsumerQueue<T>` 与 `ITimeoutItem` 属于实现细节，目前却是 `public` 声明 ——
+请勿依赖。见 `Issue.md`。
 
 ## 环境要求
 
 - .NET 8 SDK
 - Beckhoff TwinCAT ADS 环境
-- 运行 C# 程序的机器可以访问对应 ADS route
+- 运行 C# 应用程序的机器到 PLC 的 ADS 路由可达
 
-当前类库目标框架为 `net8.0`。
+类库当前目标框架为 `net8.0`。
 
 ## 构建
 
@@ -282,38 +489,36 @@ dotnet build CoapClient.sln
 
 ## Roadmap
 
-计划方向：
+计划中的方向：
 
 - Observation 模式：脱离单次命令生命周期的长期变量监听。
-- 多 ACK 命令：一个命令可以依赖多个 ACK 变量。
-- 面向真实 TwinCAT 环境的更多示例和集成测试。
-- 更完整的自定义 `IAck` 文档。
+- 多 ACK 命令：一条命令可以依赖多个 ACK 变量。
+- 针对真实 TwinCAT 环境的更完整示例与集成测试。
+- 更完整的自定义 `IAck` 实现文档。
 
 ## 参与贡献
 
-这个项目欢迎具备以下经验的开发者参与：
+本项目希望寻找具备以下经验的贡献者：
 
-- TwinCAT ADS 和 Beckhoff PLC 工作流
-- C# async 编程
+- TwinCAT ADS 与 Beckhoff PLC 工作流
+- C# 异步编程
 - 工业自动化命令模型
-- 稳健的超时和 notification 处理
-- 面向真实设备控制场景的文档和示例
+- 健壮的超时与 notification 处理
+- 面向真实机器控制场景的文档与示例
 
-适合贡献的方向：
+可以参与的方向：
 
 - 改进公开 API 的易用性。
-- 增加常见 DO/DI 和 AO/AI 工作流示例。
+- 为常见的 DO/DI 与 AO/AI 工作流补充示例。
 - 实现 Observation 模式。
-- 设计并实现多 ACK 命令支持。
-- 为命令生命周期边界情况增加测试。
-- 改进错误信息和日志。
+- 设计与实现多 ACK 命令支持。
+- 为命令生命周期的边界情况补充测试。
+- 改进错误信息与日志。
 
-修改行为前，请始终记住这个核心设计规则：
+改动行为之前，请牢记核心设计规则：
 
 ```text
-ACK observation path should be ready before the DO/AO command is sent.
+ACK 监听路径必须在 DO/AO 命令下发之前就绪。
 ```
 
-也就是：ACK 监听路径应该先准备好，然后再下发 DO/AO 命令。
-
-这条规则用于在 notification 延迟或高负载场景下保护命令生命周期的完整性。
+这条规则保证了在 notification 延迟或高负载场景下命令生命周期的完整性。

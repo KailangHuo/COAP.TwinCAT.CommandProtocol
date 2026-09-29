@@ -29,6 +29,18 @@ namespace CoapClient
     
     private TimeoutScheduler TimeoutScheduler;
 
+    /// <summary>
+    /// Timeout applied to an ACK-required command when neither the <c>timeSpan</c> argument nor
+    /// <see cref="ICoapCommand.Timeout"/> supplies one.
+    /// <para>
+    /// Without this fallback, omitting <c>timeSpan</c> on a command whose ACK never arrives would
+    /// leave the returned task pending forever — the built-in command types
+    /// (<see cref="CoapCommandItem"/>, <see cref="CoapSumCommandItem"/>) never populate
+    /// <see cref="ICoapCommand.Timeout"/>, so the fallback chain previously ended in <c>null</c>.
+    /// </para>
+    /// </summary>
+    public static readonly TimeSpan DefaultAckTimeout = TimeSpan.FromMinutes(1);
+
     public void Connect(string amsNetId, int amsPort)
     {
         this.ThinAdsServer.Connect(amsNetId, amsPort);
@@ -38,13 +50,24 @@ namespace CoapClient
     {
         try
         {
+            if (command == null)
+                throw new ArgumentNullException(nameof(command));
+
+            if (command.AckRequired && string.IsNullOrWhiteSpace(command.AckVarName))
+            {
+                throw new ArgumentException(
+                    "Command requires an ACK but its AckVarName is null or empty.", nameof(command));
+            }
+
             if (cancellationToken.IsCancellationRequested)
             {
                 return Task.FromCanceled<object>(cancellationToken);
             }
 
             CoapLog.Info($"<{command.AckVarName}> Enter SendAndWaitAckAsync");
-            TimeSpan? effectiveTimeout = command.AckRequired ? timeSpan ?? command.Timeout : null;
+            TimeSpan? effectiveTimeout = command.AckRequired
+                ? timeSpan ?? command.Timeout ?? DefaultAckTimeout
+                : null;
 
             CommandContext commandContext = new CommandContext()
             {
@@ -57,7 +80,10 @@ namespace CoapClient
 
             CoapLog.Info($"<{command.AckVarName}> CommandContext created");
 
-            if (command.AckRequired && effectiveTimeout != null)
+            // effectiveTimeout is never null here: the AckRequired branch above always resolves to
+            // something, ending in DefaultAckTimeout. Every ACK-required command therefore has a
+            // timeout scheduled and cannot hang forever.
+            if (command.AckRequired)
             {
                 this.TimeoutScheduler.ScheduleTimeout(commandContext);
             }
@@ -100,8 +126,22 @@ namespace CoapClient
             }
         
             //ISymbol ackSymbol = this.ThinAdsServer.GetSymbol()
-            ResultValue<IAdsSymbol> symbolResult = await this.ThinAdsServer.AdsClient.ReadSymbolAsync(commandContext.Command.AckVarName, 
+            ResultValue<IAdsSymbol> symbolResult = await this.ThinAdsServer.AdsClient.ReadSymbolAsync(commandContext.Command.AckVarName,
                 CancellationToken.None);
+
+            // Without this guard a failed read leaves symbolResult.Value null, and the failure
+            // surfaces later as a bare NullReferenceException from symbol.ByteSize / ReadAckBytesAsync.
+            // The overwhelming cause of ReadSymbolAsync failing on a name is that the name is not in
+            // the PLC symbol table, so it is reported as CoapSymbolNotFoundException. The underlying
+            // ADS error code is logged here for cases where that assumption does not hold
+            // (e.g. the connection went down).
+            if (symbolResult.Failed || symbolResult.Value == null)
+            {
+                CoapLog.Error($"<{commandContext.Command.AckVarName}> ReadSymbolAsync failed. " +
+                              $"AdsErrorCode: {symbolResult.ErrorCode}");
+                throw new CoapSymbolNotFoundException(commandContext.Command.AckVarName);
+            }
+
             IAdsSymbol symbol = symbolResult.Value;
             commandContext.AckSymbol = symbol;
             CoapLog.Info($"<{commandContext.Command.AckVarName}> AdsSymbol Acquired!");
@@ -205,7 +245,15 @@ namespace CoapClient
 
     public string GetServerStatusString()
     {
-        return this.ThinAdsServer.GetServerStatus();
+        try
+        {
+            return this.ThinAdsServer.GetServerStatus();
+        }
+        catch (Exception e)
+        {
+            CoapLog.Error(e.ToString());
+            throw;
+        }
     }
     
 }

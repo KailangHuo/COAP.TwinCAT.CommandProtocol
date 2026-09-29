@@ -105,7 +105,12 @@ internal class CommandContext : ITimeoutItem
         }
         catch (Exception cleanupException)
         {
-            this.AckTaskSource.TrySetException(cleanupException);
+            // Report both. Previously only the cleanup failure was surfaced and the original
+            // business exception was discarded, so the caller never learned the real reason the
+            // command failed. TryFinish merges the same way - keep the two consistent.
+            CoapLog.Error($"<{this.Command.AckVarName}> Cleanup failed while reporting a command failure.",
+                          cleanupException);
+            this.AckTaskSource.TrySetException(new AggregateException(exception, cleanupException));
             return;
         }
 
@@ -261,16 +266,24 @@ internal class CommandContext : ITimeoutItem
         {
             case CommandFinishResult.Success:
                 object valueObj = null;
+                byte[] rawAckBytes = Volatile.Read(ref this.NotificationValueRawByteArr);
+
                 if (finishException == null)
                 {
                     try
                     {
-                        byte[] rawBytes = Volatile.Read(ref this.NotificationValueRawByteArr);
-                        valueObj = this.Command.GetResult(rawBytes);
+                        valueObj = this.Command.GetResult(rawAckBytes);
                     }
                     catch (Exception e)
                     {
-                        finishException = e;
+                        // The ACK predicate was already satisfied, so the PLC-side action has
+                        // happened. Report a dedicated type so the caller cannot mistake this for a
+                        // failed command and retry a write that already took effect.
+                        CoapLog.Error($"<{this.Command.AckVarName}> Ack satisfied but GetResult threw. " +
+                                      $"The PLC-side action has already taken effect - do not retry blindly.");
+                        this.AckTaskSource.TrySetException(
+                            new CoapResultConversionException(this.Command.AckVarName, rawAckBytes, e));
+                        return;
                     }
                 }
 
@@ -305,7 +318,7 @@ internal class CommandContext : ITimeoutItem
                     finishException));
                 break;
             case CommandFinishResult.Collided:
-                this.AckTaskSource.TrySetException(new InvalidOperationException($"Command Collided! Ack: {this.Command.AckVarName}"));
+                this.AckTaskSource.TrySetException(new CoapCommandCollisionException(this.Command.AckVarName));
                 break;
             case CommandFinishResult.Cancelled:
                 this.AckTaskSource.TrySetCanceled(this.CancelToken);

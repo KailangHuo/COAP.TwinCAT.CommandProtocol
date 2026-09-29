@@ -51,13 +51,27 @@ namespace CoapClient
             }
         }
 
+        /// <summary>
+        /// Guards every symbol-table lookup. Kept in one place so the "not connected" check cannot
+        /// drift between callers again — previously <see cref="VariableExists"/> had it while
+        /// <see cref="GetSymbol"/> did not, so reading a variable on an unconnected client surfaced
+        /// as a bare <see cref="NullReferenceException"/> instead of a meaningful error.
+        /// </summary>
+        private void RequireSymbolTable()
+        {
+            if (this.SymbolCollection == null)
+                throw new CoapNotConnectedException();
+        }
+
         public ISymbol GetSymbol(string varName)
         {
             if (string.IsNullOrWhiteSpace(varName))
                 throw new ArgumentException("Variable name is null or empty.", nameof(varName));
 
+            this.RequireSymbolTable();
+
             if (!SymbolCollection.Contains(varName))
-                throw new InvalidOperationException($"Symbol '{varName}' was not found.");
+                throw new CoapSymbolNotFoundException(varName);
 
             ISymbol symbol = SymbolCollection[varName];
             return symbol;
@@ -72,9 +86,7 @@ namespace CoapClient
             if (string.IsNullOrWhiteSpace(varName))
                 throw new ArgumentException("Variable name is null or empty.", nameof(varName));
 
-            if (this.SymbolCollection == null)
-                throw new InvalidOperationException(
-                    "The ADS symbol table has not been loaded. Call Connect() before querying variables.");
+            this.RequireSymbolTable();
 
             return this.SymbolCollection.Contains(varName);
         }

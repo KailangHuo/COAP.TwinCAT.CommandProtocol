@@ -7,12 +7,22 @@ namespace CoapClient
 {
     public TimeoutScheduler(CancellationToken token)
     {
-        this.TimeoutItemChannel = Channel.CreateBounded<ITimeoutItem>(
-            new BoundedChannelOptions(500)
+        // Unbounded on purpose.
+        //
+        // This channel is only a hand-off buffer between the caller thread and the worker, which
+        // drains it into TimeoutMinHeap. The real bound on pending items is the number of in-flight
+        // commands, and CommandInFlightManager already caps that at one per ACK variable.
+        //
+        // A bounded channel here was actively harmful: it was configured with
+        // BoundedChannelFullMode.Wait, but the writer used TryWrite (which never waits), so the
+        // Wait mode never took effect. Once 500 items were queued the write failed and
+        // SendAndWaitAck threw InvalidOperationException *synchronously* - not as a task fault -
+        // so callers that only awaited the returned task never saw it.
+        this.TimeoutItemChannel = Channel.CreateUnbounded<ITimeoutItem>(
+            new UnboundedChannelOptions
             {
                 SingleReader = true,
                 SingleWriter = false,
-                FullMode = BoundedChannelFullMode.Wait,
             });
         this.TimeoutMinHeap = new PriorityQueue<(ITimeoutItem Item, long DeadlineTicks), long>();
         this.WorkerEvent = new AutoResetEvent(false);
@@ -69,10 +79,13 @@ namespace CoapClient
         if (timeoutItem == null)
             throw new ArgumentNullException(nameof(timeoutItem));
 
-        bool success = this.TimeoutItemChannel.Writer.TryWrite(timeoutItem);
-        if (!success)
+        // The channel is unbounded and its writer is never completed, so this cannot fail for
+        // capacity reasons. Kept as a safety net: dropping the item silently would leave the
+        // command without a timeout and hang the caller, so fail loudly instead.
+        if (!this.TimeoutItemChannel.Writer.TryWrite(timeoutItem))
         {
-            throw new InvalidOperationException("Failed to enqueue timeout item into TimeoutItemChannel.");
+            throw new InvalidOperationException(
+                "TimeoutItemChannel rejected the item. The writer should never complete.");
         }
 
         this.WorkerEvent.Set();

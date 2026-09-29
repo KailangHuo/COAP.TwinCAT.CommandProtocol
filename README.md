@@ -100,6 +100,24 @@ Complete the command when PC_GVAR.DI_AT_POS == true.
 Timeout after 3 seconds.
 ```
 
+## Timeouts
+
+Every ACK-required command has a timeout. The value is resolved in this order:
+
+```text
+1. the timeSpan argument passed to SendAndWaitAck
+2. ICoapCommand.Timeout, when the command supplies one
+3. SimpleCoapClient.DefaultAckTimeout  — currently 1 minute
+```
+
+The third step matters: `CoapCommandItem` and `CoapSumCommandItem` do **not** populate
+`ICoapCommand.Timeout`, so omitting `timeSpan` falls through to `DefaultAckTimeout`. If you
+need a different bound, either pass `timeSpan` explicitly or derive from `AbstractCoapCommand`
+and set `Timeout` in your own constructor.
+
+Commands without an ACK (`AckRequired == false`) are never scheduled for timeout — they complete
+as soon as the write is dispatched.
+
 ## Cancellation
 
 `SendAndWaitAck` accepts an optional `CancellationToken`. When the token is signalled, the command task completes as cancelled instead of waiting for the ACK or the timeout.
@@ -131,6 +149,9 @@ catch (OperationCanceledException)
 
 Cancellation is cooperative: CoapClient stops waiting and unregisters the notification handle, but it does not undo the DO/AO write already sent to the PLC.
 
+Note this example relies on the `CancellationTokenSource` to bound the wait — it does not pass
+`timeSpan`. Without the token, the command would time out after `DefaultAckTimeout` instead.
+
 ## Public API
 
 ### SimpleCoapClient
@@ -139,12 +160,18 @@ Main entry point for callers.
 
 | Member | Description |
 |---|---|
-| `Connect(string amsNetId, int amsPort)` | Connects to the TwinCAT ADS server. |
+| `Connect(string amsNetId, int amsPort)` | Connects to the TwinCAT ADS server and loads the symbol table. |
 | `Task<object> SendAndWaitAck(ICoapCommand command, TimeSpan? timeSpan = null, CancellationToken cancellationToken = default)` | Sends a command and returns a task that completes when the ACK is satisfied, fails, collides, is cancelled, or times out. |
 | `bool VariableExists(string varName)` | Checks whether a PLC variable exists, using the locally cached symbol table. No ADS round trip. |
 | `object GetVariableValue(string varName)` | Reads a PLC variable value directly. |
 | `object[] GetSumVariableValue(string[] varNames)` | Reads several PLC variable values in a single ADS sum read; the result aligns with `varNames`. |
 | `string GetServerStatusString()` | Reads the ADS server state as a string. |
+| `static readonly TimeSpan DefaultAckTimeout` | Fallback ACK timeout, currently 1 minute. See [Timeouts](#timeouts). |
+
+Parameter validation: `SendAndWaitAck` throws `ArgumentNullException` when `command` is `null`,
+and `ArgumentException` when the command requires an ACK but its `AckVarName` is null or empty.
+Both are thrown **before** the cancellation check, so a malformed command fails loudly even when
+the token is already cancelled.
 
 Batch read in one ADS round-trip:
 
@@ -174,14 +201,11 @@ Behavior and constraints:
 | Variable exists in the loaded symbol table | `true` |
 | Variable does not exist | `false` |
 | `varName` is null, empty, or whitespace | throws `ArgumentException` |
-| `Connect` has not been called | throws `InvalidOperationException` |
+| `Connect` has not been called | throws `CoapNotConnectedException` |
 
 The symbol table is loaded during `Connect` and is **not refreshed automatically**. After
 the PLC application is re-downloaded, call `Connect` again before relying on this check —
 otherwise a stale table can report a variable that no longer exists.
-
-Because the table is lazily loaded, the first lookup after `Connect` may still trigger one
-device transfer; subsequent lookups are served from the local cache.
 
 ### VariableWriteItem
 
@@ -196,17 +220,74 @@ var item = new VariableWriteItem("PC_GVAR.DO_TO_POS", true);
 | `VarName` | PLC variable name to write. |
 | `Value` | Value to write. |
 
-### CoapCommandItem
+### ICoapCommand
 
-Represents a single-variable command.
+The contract `SendAndWaitAck` operates on. Implement it directly, or derive from
+`AbstractCoapCommand` (recommended — see below).
+
+| Member | Description |
+|---|---|
+| `bool AckRequired` | `false` makes the command fire-and-forget: the write is dispatched and the task completes immediately, with no notification, no ACK check and no timeout. |
+| `string AckVarName` | The DI/AI variable observed for the result. Required when `AckRequired` is `true`. |
+| `int CycleTime` | Interval, **in milliseconds**, at which the ADS server samples the ACK variable for changes. Passed to `NotificationSettings`. |
+| `int MaxDelayTime` | Maximum delay, **in milliseconds**, passed to `NotificationSettings`. `0` disables the mechanism. |
+| `TimeSpan? Timeout` | Optional per-command ACK timeout. Used when `SendAndWaitAck` is called without `timeSpan`. |
+| `Type ValueType` | Declared for type information. Not currently populated or read by the library — treat it as unused. |
+| `bool ValidateAck(byte[] rawAckData)` | Returns whether the raw ACK bytes satisfy the command's condition. |
+| `object GetResult(byte[] rawData)` | Converts the raw ACK bytes into the object returned by `SendAndWaitAck`. |
+
+> `CycleTime` and `MaxDelayTime` are **milliseconds** here, because they bind to
+> `NotificationSettings(AdsTransMode, int, int)`. The raw ADS protocol
+> (`AdsNotificationAttrib`) uses 100 ns units instead — do not copy values between the two.
+
+### AbstractCoapCommand
+
+Base class for custom commands. It implements `ICoapCommand` and delegates ACK handling to an
+`IAck` instance, so a derived class only has to supply the payload and the properties.
 
 ```csharp
-var command = new CoapCommandItem(writeItem, ack);
+public class MyCommand : AbstractCoapCommand
+{
+    public MyCommand(VariableWriteItem write, IAck ack)
+    {
+        this.WriteItem = write;
+        this.AckPredicate = ack;
+        this.AckRequired = true;
+        this.AckVarName = ack.AckVarName;
+        this.CycleTime = 2;
+        this.MaxDelayTime = 0;
+        this.Timeout = TimeSpan.FromSeconds(5);   // protected set
+    }
+
+    public VariableWriteItem WriteItem { get; }
+}
 ```
+
+| Member | Description |
+|---|---|
+| `AckPredicate` | The `IAck` used by `ValidateAck` / `GetResult`. |
+| `AckRequired`, `CycleTime`, `MaxDelayTime`, `AckVarName`, `Timeout` | `protected set`, so a derived class can populate them. |
+| `ValidateAck(byte[])` | Returns `true` when `AckRequired` is `false`; otherwise delegates to `AckPredicate.IsMatched`. |
+| `GetResult(byte[])` | Returns `true` when `AckRequired` is `false`; otherwise delegates to `AckPredicate.GetResultWithType`. |
+
+### CoapCommandItem
+
+Single-variable command, derived from `AbstractCoapCommand`.
+
+```csharp
+// ack omitted (or null) => AckRequired stays false => fire-and-forget
+var command = new CoapCommandItem(writeItem);
+
+// with ACK; cycleTime defaults to 2 ms
+var command = new CoapCommandItem(writeItem, ack);
+var command = new CoapCommandItem(writeItem, ack, cycleTime: 10);
+```
+
+Passing `null` for `ack` is the supported way to issue a write without waiting for a result.
 
 ### CoapSumCommandItem
 
-Represents a multi-variable write command.
+Multi-variable write command, dispatched via an ADS sum write.
 
 ```csharp
 var command = new CoapSumCommandItem(
@@ -217,6 +298,11 @@ var command = new CoapSumCommandItem(
     },
     ack);
 ```
+
+Same three constructor forms as `CoapCommandItem`, including the optional `cycleTime`.
+
+The written variables must all be distinct — a repeated variable raises `InvalidOperationException`
+at dispatch time.
 
 ### IAck
 
@@ -260,6 +346,9 @@ IAck ack = new AckPredicate<int>(
 | `LessOrEqual` | ACK value is less than or equal to the expected value | `arg1` |
 | `InBetween` | ACK value is within a closed interval | `arg1`, `arg2` |
 
+The three ordering predicates require a comparable ACK value type; using them with a value type
+that does not support comparison raises `InvalidOperationException`.
+
 ## Command Lifecycle
 
 Internally, a command moves through these states:
@@ -276,13 +365,114 @@ Internally, a command moves through these states:
 
 Only one in-flight command can use the same ACK variable at the same time. This avoids ambiguous notification ownership.
 
+## Exceptions
+
+`SendAndWaitAck` reports every terminal state through the returned task — either the ACK value,
+or one of the exceptions below. Note that a few failures are thrown **synchronously** from the
+call itself rather than through the task; see the notes.
+
+| Exception | Meaning |
+|---|---|
+| `TimeoutException` | The ACK predicate was not satisfied before the timeout. The message carries the last known value. |
+| `CoapCommandCollisionException` | Another command already owns this ACK variable. Carries `AckVarName`. |
+| `OperationCanceledException` (as `TaskCanceledException`) | The command was cancelled through the `CancellationToken`. |
+| `CoapResultConversionException` | **The command succeeded but the task still faulted.** See below. |
+| `CoapSymbolNotFoundException` | The variable is not in the loaded symbol table. Carries `VarName`. |
+| `CoapNotConnectedException` | `Connect` has not been called. |
+| ADS exceptions (`AdsErrorException` and friends) | Propagated from the underlying `Beckhoff.TwinCAT.Ads` layer. |
+
+Synchronous throws:
+
+- `SendAndWaitAck` with a `null` command → `ArgumentNullException`.
+- `SendAndWaitAck` with a command that requires an ACK but has an empty `AckVarName` → `ArgumentException`.
+- `Connect` rethrows whatever the ADS layer reports, unchanged.
+
+### `CoapResultConversionException` — do not retry blindly
+
+This is the one exception that means the command **succeeded**. The ACK predicate was satisfied,
+so the PLC-side action has already taken effect — but `ICoapCommand.GetResult` then threw while
+turning the raw ACK bytes into a result object.
+
+A caller that treats this as a command failure and re-issues the write will execute the PLC
+action a **second time**. Inspect `RawAckData` (the bytes the PLC actually reported) and the
+`InnerException` (whatever `GetResult` threw) instead.
+
+```csharp
+try
+{
+    object result = await client.SendAndWaitAck(command);
+}
+catch (CoapResultConversionException ex)
+{
+    // The PLC action already happened. Investigate, do not blindly retry.
+    Console.WriteLine($"ACK was satisfied ({ex.AckVarName}) but result parsing failed.");
+    Console.WriteLine($"Raw ACK bytes: {Convert.ToHexString(ex.RawAckData ?? Array.Empty<byte>())}");
+    Console.WriteLine($"Cause: {ex.InnerException?.Message}");
+}
+catch (CoapCommandCollisionException ex)
+{
+    Console.WriteLine($"{ex.AckVarName} already has a command in flight.");
+}
+catch (CoapSymbolNotFoundException ex)
+{
+    Console.WriteLine($"{ex.VarName} is not part of the current PLC project.");
+}
+catch (CoapNotConnectedException)
+{
+    Console.WriteLine("Call Connect() first.");
+}
+```
+
+### Backward compatibility
+
+`CoapCommandCollisionException`, `CoapSymbolNotFoundException` and `CoapNotConnectedException`
+all derive from `InvalidOperationException`, so callers written against earlier versions that
+caught `InvalidOperationException` keep working. Prefer the specific types in new code — the
+base type alone cannot tell these conditions apart.
+
+## Logging
+
+The library logs through **log4net** using its own repository and logger:
+
+```text
+repository : CoapProjectRepository
+logger     : [COAP]
+```
+
+The repository is configured internally, so you do not need to add a log4net configuration to
+see library output. `Connect`, command dispatch, ACK validation, handle cleanup and timeout
+handling all write log entries; failures are logged before the exception is propagated.
+
+## Concurrency
+
+- **Different ACK variables** may be used by concurrent commands. Each command owns its own
+  notification handle, and the notification callback thread hands work to a single consumer
+  queue, so ACK processing for different commands is serialized rather than interleaved.
+- **The same ACK variable** cannot have two in-flight commands. The second one fails
+  immediately with `CoapCommandCollisionException`.
+- Commands without an ACK are dispatched through a serialized sender.
+
+## Lifetime
+
+`SimpleCoapClient` does **not** implement `IDisposable` yet, and there is no `Disconnect`. The
+underlying ADS connection is therefore held for the lifetime of the instance. Create **one
+client per application** and reuse it rather than constructing a new one per command —
+repeatedly creating clients leaks ADS connections and handles, and TwinCAT allows roughly
+8191 handles in total.
+
+See `CoapTestConsole/Issue.md` for the tracked work item.
+
 ## Project Structure
+
+Paths are relative to the repository root.
 
 | Path | Purpose |
 |---|---|
-| `CoapClient/` | Library source code. |
-| `CoapTestConsole/` | Small console project for manual experiments. |
+| `CoapClient/CoapClient/` | Library source code. |
+| `CoapClient/CoapTestConsole/` | Small console project for manual experiments. |
 | `CoapClient/BRIEF.md` | Maintainer notes describing the project intent. |
+| `CoapClient/CoapTestConsole/Issue.md` | Known open defects. |
+| `CoapClient/CoapTestConsole/CoapClient_KnownIssues.md` | Exception-semantics traps, for downstream consumers. |
 
 Important internal components:
 
@@ -294,6 +484,9 @@ Important internal components:
 | `CommandHandler` | Handles ADS notifications and routes them to command contexts. |
 | `CommandInFlightManager` | Prevents ACK variable collisions. |
 | `TimeoutScheduler` | Schedules command timeout callbacks. |
+
+`SingleConsumerQueue<T>` and `ITimeoutItem` are implementation details that are currently
+declared `public`; do not depend on them. See `Issue.md`.
 
 ## Requirements
 
