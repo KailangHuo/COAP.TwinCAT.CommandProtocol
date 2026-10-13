@@ -164,6 +164,7 @@ Main entry point for callers.
 | `Task<object> SendAndWaitAck(ICoapCommand command, TimeSpan? timeSpan = null, CancellationToken cancellationToken = default)` | Sends a command and returns a task that completes when the ACK is satisfied, fails, collides, is cancelled, or times out. |
 | `bool VariableExists(string varName)` | Checks whether a PLC variable exists, using the locally cached symbol table. No ADS round trip. |
 | `object GetVariableValue(string varName)` | Reads a PLC variable value directly. |
+| `ISymbol? GetVariableSymbol(string varName)` | Looks up a PLC variable's symbol metadata — declared type, type category, byte size, members. Local lookup, no ADS round trip. Returns `null` when the variable does not exist. |
 | `object[] GetSumVariableValue(string[] varNames)` | Reads several PLC variable values in a single ADS sum read; the result aligns with `varNames`. |
 | `string GetServerStatusString()` | Reads the ADS server state as a string. |
 | `static readonly TimeSpan DefaultAckTimeout` | Fallback ACK timeout, currently 1 minute. See [Timeouts](#timeouts). |
@@ -206,6 +207,48 @@ Behavior and constraints:
 The symbol table is loaded during `Connect` and is **not refreshed automatically**. After
 the PLC application is re-downloaded, call `Connect` again before relying on this check —
 otherwise a stale table can report a variable that no longer exists.
+
+### Reading a variable's type
+
+`GetVariableSymbol` returns the symbol metadata for a variable — the same local lookup as
+`VariableExists`, but it hands back the symbol instead of a boolean.
+
+```csharp
+ISymbol? symbol = client.GetVariableSymbol("PC_GVAR.DI_AT_POS");
+if (symbol is null)
+{
+    Console.WriteLine("Variable is not part of the current PLC project.");
+    return;
+}
+
+symbol.TypeName               // "BOOL"  — the declared PLC type name
+symbol.ByteSize               // 1
+symbol.DataType.Category      // DataTypeCategory.Primitive
+symbol.DataType.IsPrimitive   // true
+symbol.SubSymbols             // members, for struct and array types
+```
+
+To get the .NET equivalent of the PLC type, hand `symbol.DataType` to the TwinCAT ADS resolver:
+
+```csharp
+// using TwinCAT.TypeSystem;
+DataTypeResolverExtension.TryGetManagedType(symbol.DataType, out Type? managed);
+```
+
+Behavior matches `VariableExists`: the variable does not exist returns `null`, a null/empty name
+throws `ArgumentException`, and calling it before `Connect` throws `CoapNotConnectedException`.
+
+Two things to keep in mind:
+
+- **The returned `ISymbol` is a live reference into the symbol table, not a copy.** Treat it as
+  read-only.
+- **The type information is a snapshot taken at `Connect` and is not refreshed.** This is more
+  dangerous than a stale existence check: a stale *existence* answer at worst points you at a name
+  that is gone, while a stale *type* answer can make you parse correct data the wrong way and
+  silently produce wrong values. Re-connect after a PLC re-download before relying on it.
+
+This API is a query only. It does not participate in the command lifecycle — it cannot affect,
+and is not affected by, `SendAndWaitAck`.
 
 ### VariableWriteItem
 

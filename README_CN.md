@@ -162,6 +162,7 @@ token，命令会等到 `DefaultAckTimeout` 才超时。
 | `Task<object> SendAndWaitAck(ICoapCommand command, TimeSpan? timeSpan = null, CancellationToken cancellationToken = default)` | 下发命令，返回的 Task 在 ACK 满足、失败、冲突、取消或超时时完成。 |
 | `bool VariableExists(string varName)` | 用本地缓存的符号表判断变量是否存在，不走 ADS 往返。 |
 | `object GetVariableValue(string varName)` | 直接读取一个 PLC 变量。 |
+| `ISymbol? GetVariableSymbol(string varName)` | 查询变量的符号元数据 —— 声明类型、类型分类、字节大小、成员。本地查找，不走 ADS 往返。变量不存在时返回 `null`。 |
 | `object[] GetSumVariableValue(string[] varNames)` | 用一次 ADS sum 读批量读取多个变量，返回值与 `varNames` 顺序对齐。 |
 | `string GetServerStatusString()` | 读取 ADS Server 状态（字符串形式）。 |
 | `static readonly TimeSpan DefaultAckTimeout` | ACK 超时的兜底值，当前为 1 分钟。见[超时](#超时)。 |
@@ -201,6 +202,45 @@ if (!client.VariableExists("PC_GVAR.DO_TO_POS"))
 
 符号表在 `Connect` 时加载，**不会自动刷新**。PLC 程序重新下载后，请重新 `Connect`
 再依赖此检查 —— 否则过期的符号表可能报告一个已经不存在的变量。
+
+### 获取变量的类型
+
+`GetVariableSymbol` 返回变量的符号元数据 —— 和 `VariableExists` 是同一次本地查找，
+只是把返回值从布尔换成了符号本身。
+
+```csharp
+ISymbol? symbol = client.GetVariableSymbol("PC_GVAR.DI_AT_POS");
+if (symbol is null)
+{
+    Console.WriteLine("该变量不在当前 PLC 工程中。");
+    return;
+}
+
+symbol.TypeName               // "BOOL" —— PLC 声明的类型名
+symbol.ByteSize               // 1
+symbol.DataType.Category      // DataTypeCategory.Primitive
+symbol.DataType.IsPrimitive   // true
+symbol.SubSymbols             // 成员（结构体、数组类型）
+```
+
+要拿到 PLC 类型对应的 .NET 类型，把 `symbol.DataType` 交给 TwinCAT ADS 的解析器：
+
+```csharp
+// using TwinCAT.TypeSystem;
+DataTypeResolverExtension.TryGetManagedType(symbol.DataType, out Type? managed);
+```
+
+行为与 `VariableExists` 一致：变量不存在返回 `null`，名字为 null/空抛 `ArgumentException`，
+未 `Connect` 时抛 `CoapNotConnectedException`。
+
+两点需要注意：
+
+- **返回的 `ISymbol` 是符号表内的活引用，不是副本。** 请只读使用。
+- **类型信息是 `Connect` 时刻的快照，不会刷新。** 这比"过期的存在性"更危险：
+  过期的**存在性**最多让你查到一个已经不存在的名字；而过期的**类型**会让你用错误的方式
+  解析正确的数据，**静默产生错值**。PLC 重新下载后务必重连再依赖它。
+
+这个 API 只是查询，**不参与命令生命周期** —— 既不能影响 `SendAndWaitAck`，也不受它影响。
 
 ### VariableWriteItem
 

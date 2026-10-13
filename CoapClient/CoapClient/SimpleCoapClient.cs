@@ -1,5 +1,6 @@
 ﻿using TwinCAT.Ads;
 using TwinCAT.Ads.TypeSystem;
+using TwinCAT.TypeSystem;
 
 namespace CoapClient
 {
@@ -204,6 +205,37 @@ namespace CoapClient
         try
         {
             return this.ThinAdsServer.VariableExists(varName);
+        }
+        catch (Exception e)
+        {
+            CoapLog.Error(e.ToString());
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Looks up a PLC variable in the locally cached symbol table and returns its metadata -
+    /// declared type name, type category, byte size and members. Local lookup only; no ADS round trip.
+    /// <para>
+    /// The returned <see cref="ISymbol"/> is a live reference into the symbol table, not a copy.
+    /// Treat it as read-only. For the .NET equivalent of the PLC type, pass
+    /// <c>symbol.DataType</c> to the TwinCAT ADS type resolver.
+    /// </para>
+    /// <para>
+    /// The symbol table is loaded by <see cref="Connect"/> and is <b>not refreshed automatically</b>.
+    /// After the PLC application is re-downloaded, the type information may be stale - and stale
+    /// type information is more dangerous than a stale existence check, because it can make a caller
+    /// parse correct data the wrong way. Re-connect before relying on it.
+    /// </para>
+    /// </summary>
+    /// <returns>The symbol, or <c>null</c> when the variable is not part of the current PLC project.</returns>
+    /// <exception cref="ArgumentException">The variable name is null, empty, or whitespace.</exception>
+    /// <exception cref="CoapNotConnectedException">Not connected yet; the symbol table has not been loaded.</exception>
+    public ISymbol? GetVariableSymbol(string varName)
+    {
+        try
+        {
+            return this.ThinAdsServer.FindSymbol(varName);
         }
         catch (Exception e)
         {

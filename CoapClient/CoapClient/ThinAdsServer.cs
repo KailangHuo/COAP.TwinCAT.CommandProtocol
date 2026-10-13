@@ -91,6 +91,25 @@ namespace CoapClient
             return this.SymbolCollection.Contains(varName);
         }
 
+        /// <summary>
+        /// Looks up a symbol without throwing when the variable is unknown.
+        /// <para>
+        /// Companion to <see cref="VariableExists"/> and <see cref="GetSymbol"/>: same local
+        /// symbol-table lookup, no ADS round trip. Use this when the caller wants the symbol's
+        /// metadata - declared type, byte size, members - rather than just its existence.
+        /// </para>
+        /// </summary>
+        /// <returns>The symbol, or <c>null</c> when the name is not in the symbol table.</returns>
+        public ISymbol? FindSymbol(string varName)
+        {
+            if (string.IsNullOrWhiteSpace(varName))
+                throw new ArgumentException("Variable name is null or empty.", nameof(varName));
+
+            this.RequireSymbolTable();
+
+            return this.SymbolCollection.TryGetInstance(varName, out ISymbol symbol) ? symbol : null;
+        }
+
         public void SendCommand(VariableWriteItem variableWriteItem)
         {
             string varName = variableWriteItem.VarName;

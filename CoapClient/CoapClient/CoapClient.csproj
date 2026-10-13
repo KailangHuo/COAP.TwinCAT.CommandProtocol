@@ -5,7 +5,7 @@
         <Nullable>enable</Nullable>
         <TargetFramework>net8.0</TargetFramework>
         <PackageId>COAP.TwinCAT.CommandProtocol</PackageId>
-        <Version>0.3.0</Version>
+        <Version>0.3.1</Version>
         <Authors>KailangHuo</Authors>
         <Company>KailangHuo</Company>
         <Product>CoapClient</Product>
