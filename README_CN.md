@@ -10,6 +10,8 @@ CoapClient 是一个面向 Beckhoff TwinCAT ADS 的 C# 命令式通信中间件�
 
 > 注意：本项目不是 IETF CoAP 协议的实现。在本项目中，COAP 表示 Command Oriented Ads Protocol。
 
+> 0.4.x 起提供连接状态、1 秒心跳、断线重连与 `IDisposable`；`Connected` 同时要求 ADS 可达、符号表就绪且 PLC 处于 `Run`。
+
 ## 命令时序
 
 下图展示了 CoapClient 如何先准备 ACK 监听路径，再写入命令变量，并在 PLC 发布预期 ACK 后完成命令。
@@ -164,7 +166,12 @@ token，命令会等到 `DefaultAckTimeout` 才超时。
 | `object GetVariableValue(string varName)` | 直接读取一个 PLC 变量。 |
 | `ISymbol? GetVariableSymbol(string varName)` | 查询变量的符号元数据 —— 声明类型、类型分类、字节大小、成员。本地查找，不走 ADS 往返。变量不存在时返回 `null`。 |
 | `object[] GetSumVariableValue(string[] varNames)` | 用一次 ADS sum 读批量读取多个变量，返回值与 `varNames` 顺序对齐。 |
-| `string GetServerStatusString()` | 读取 ADS Server 状态（字符串形式）。 |
+| `string GetServerStatusString()` | 返回最后已知的 PLC 状态；传输不可达时返回 COAP 状态名（如 `Recovering`）。不再做实时 ADS 读取。 |
+| `CoapConnectionState ConnectionState` | 当前 COAP 连接状态。 |
+| `CoapConnectionSnapshot ConnectionSnapshot` | 不可变连接快照（状态、符号表、代次、PLC 状态、最后错误）。 |
+| `AdsState? LastKnownPlcState` | 最后一次已知的 PLC `AdsState`。 |
+| `event EventHandler<CoapConnectionStateChangedEventArgs> ConnectionStateChanged` | 连接状态变化事件。 |
+| `void Dispose()` | 停止心跳/重连、队列与超时调度器，终结在途命令并释放 ADS 会话。 |
 | `static readonly TimeSpan DefaultAckTimeout` | ACK 超时的兜底值，当前为 1 分钟。见[超时](#超时)。 |
 
 参数校验：`command` 为 `null` 时抛 `ArgumentNullException`；命令需要 ACK 但 `AckVarName`
@@ -178,6 +185,45 @@ object[] values = client.GetSumVariableValue(
     new[] { "PC_GVAR.DI_AT_POS", "PC_GVAR.AI_PRESSURE" });
 bool atPos = (bool)values[0];
 ```
+
+### 连接状态与断线重连
+
+`SimpleCoapClient` 在后台每 1 秒读取一次 ADS 状态，并在断线后自动重连。
+
+| 状态 | 含义 |
+|---|---|
+| `Disconnected` | 尚未连接，或首次连接失败。 |
+| `Connecting` | 正在执行首次 `Connect`。 |
+| `Connected` | ADS 可达、符号表已加载、PLC 处于 `Run`。 |
+| `Recovering` | 传输中断，或 PLC 可达但不在 `Run`；正在退避重试。 |
+| `Disposed` | 已调用 `Dispose`。 |
+
+**发布顺序是不变量**：先重建符号表并原子替换快照，再发布 `Connected` 并触发事件。因此
+在事件处理器里查询符号表一定是安全的。非 `Connected` 状态下，符号查询抛
+`CoapNotConnectedException`，`SendAndWaitAck` 返回 faulted task。
+
+```csharp
+client.ConnectionStateChanged += (sender, e) =>
+{
+    Console.WriteLine($"{e.OldState} -> {e.NewState} (generation {e.Generation})");
+};
+
+if (client.ConnectionState == CoapConnectionState.Connected)
+{
+    bool exists = client.VariableExists("PC_GVAR.DI_AT_POS");
+}
+```
+
+恢复行为：
+
+- 断线后进入 `Recovering`，按 1s → 2s → 5s 退避。
+- 恢复时释放旧 `AdsSession`、创建新 session、重新加载符号表；成功后回到 `Connected`。
+- PLC 可达但 `AdsState.Stop/Config` 时停留在 `Recovering`，不会反复重建传输。
+- 21 秒的 FailFast 窗口保留：断线后的调用快速失败，而不是每次等 5 秒。
+- **在途命令不会自动重放**。断线时它们不会被自动续跑，而是按自身超时结束；旧代次的通知、
+  符号引用和通知句柄会被丢弃，避免误伤新连接上的命令。
+- 同一实例只对应一个 AMS 目标：已运行时再次 `Connect` 同目标直接返回，不同目标抛
+  `InvalidOperationException`。首次连接失败不会自动重试，由调用方决定是否再次 `Connect`。
 
 ### 检查变量是否存在
 
@@ -198,10 +244,11 @@ if (!client.VariableExists("PC_GVAR.DO_TO_POS"))
 | 变量存在于已加载的符号表 | `true` |
 | 变量不存在 | `false` |
 | `varName` 为 null、空或纯空白 | 抛 `ArgumentException` |
-| 尚未调用 `Connect` | 抛 `CoapNotConnectedException` |
+| 不在 `Connected` 状态（未连接、重连中、PLC 非 Run） | 抛 `CoapNotConnectedException` |
 
-符号表在 `Connect` 时加载，**不会自动刷新**。PLC 程序重新下载后，请重新 `Connect`
-再依赖此检查 —— 否则过期的符号表可能报告一个已经不存在的变量。
+符号表在 `Connect` 时加载，并在**每次成功重连后重建**。连接保持期间不会自动刷新：
+PLC 程序重新下载或 Online Change 后，请等待一次重连再依赖此检查，否则过期的符号表可能
+报告一个已经不存在的变量。
 
 ### 获取变量的类型
 
@@ -231,14 +278,14 @@ DataTypeResolverExtension.TryGetManagedType(symbol.DataType, out Type? managed);
 ```
 
 行为与 `VariableExists` 一致：变量不存在返回 `null`，名字为 null/空抛 `ArgumentException`，
-未 `Connect` 时抛 `CoapNotConnectedException`。
+不在 `Connected` 状态时抛 `CoapNotConnectedException`。
 
 两点需要注意：
 
 - **返回的 `ISymbol` 是符号表内的活引用，不是副本。** 请只读使用。
-- **类型信息是 `Connect` 时刻的快照，不会刷新。** 这比"过期的存在性"更危险：
-  过期的**存在性**最多让你查到一个已经不存在的名字；而过期的**类型**会让你用错误的方式
-  解析正确的数据，**静默产生错值**。PLC 重新下载后务必重连再依赖它。
+- **类型信息属于当前连接代次。** 每次成功重连都会重建符号表，重连后旧 `ISymbol` 引用即失效，
+  不要跨 `ConnectionStateChanged` 缓存它。连接保持期间的 Online Change 也不会自动刷新，
+  请等待一次重连再依赖它。
 
 这个 API 只是查询，**不参与命令生命周期** —— 既不能影响 `SendAndWaitAck`，也不受它影响。
 
@@ -398,6 +445,9 @@ IAck ack = new AckPredicate<int>(
 
 同一时刻，同一个 ACK 变量只能有一条在途命令。这避免了 notification 归属的歧义。
 
+连接丢失不是命令终态。断线时在途命令不会被自动重放，而是按自身超时结束；旧连接的通知、
+符号引用和通知句柄由连接代次隔离，不会误伤重连后的新命令。
+
 ## 异常
 
 `SendAndWaitAck` 通过返回的 Task 报告所有终态 —— 要么是 ACK 值，要么是下列异常之一。
@@ -410,13 +460,15 @@ IAck ack = new AckPredicate<int>(
 | `OperationCanceledException`（实际为 `TaskCanceledException`）| 命令通过 `CancellationToken` 取消。 |
 | `CoapResultConversionException` | **命令已成功，但 Task 仍然 faulted。** 见下。 |
 | `CoapSymbolNotFoundException` | 变量不在已加载的符号表中。带 `VarName`。 |
-| `CoapNotConnectedException` | 尚未调用 `Connect`。 |
+| `CoapNotConnectedException` | 连接不在 `Connected` 状态（未连接、重连中，或 PLC 非 `Run`）。 |
+| `ObjectDisposedException` | `SimpleCoapClient` 已经 `Dispose`，仍在尝试下发命令。 |
 | ADS 异常（`AdsErrorException` 等）| 由底层 `Beckhoff.TwinCAT.Ads` 层原样抛出。 |
 
 同步抛出：
 
 - `SendAndWaitAck` 传入 `null` 命令 → `ArgumentNullException`。
 - `SendAndWaitAck` 传入需要 ACK 但 `AckVarName` 为空的命令 → `ArgumentException`。
+- 已 `Dispose` 后调用 `SendAndWaitAck` → `ObjectDisposedException`。
 - `Connect` 原样重抛 ADS 层报出的异常。
 
 ### `CoapResultConversionException` —— 不要盲目重试
@@ -449,7 +501,7 @@ catch (CoapSymbolNotFoundException ex)
 }
 catch (CoapNotConnectedException)
 {
-    Console.WriteLine("请先调用 Connect()。");
+    Console.WriteLine("连接尚未就绪；等待 ConnectionState == Connected 后重试。");
 }
 ```
 
@@ -469,7 +521,7 @@ logger     : [COAP]
 ```
 
 repository 在内部完成配置，因此无需额外添加 log4net 配置即可看到日志。`Connect`、命令下发、
-ACK 校验、handle 清理、超时处理都会写日志；失败会在异常抛出前先记录。
+ACK 校验、handle 清理、超时处理、连接丢失/恢复都会写日志；失败会在异常抛出前先记录。
 
 ## 并发
 
@@ -477,14 +529,30 @@ ACK 校验、handle 清理、超时处理都会写日志；失败会在异常抛
   工作交给单一消费者队列，因此不同命令的 ACK 处理是串行的，不会交错。
 - **同一个 ACK 变量**不能有两条在途命令。第二条会立刻以 `CoapCommandCollisionException` 失败。
 - 不带 ACK 的命令通过串行化的 sender 下发。
+- 心跳/重连由单实例后台循环串行执行，不会与命令下发并发执行 `Connect`。
+- `ConnectionStateChanged` 在后台线程上同步触发；处理器必须短小，不要阻塞，也不要在处理器里
+  同步调用 `Connect`/`Dispose`。
 
 ## 生命周期
 
-`SimpleCoapClient` **目前尚未**实现 `IDisposable`，也没有 `Disconnect`。底层 ADS 连接会随实例
-一直持有。因此请**每个应用创建一个 client 并复用**，不要按命令创建 ——
-反复创建会泄漏 ADS 连接与句柄，而 TwinCAT 的句柄总数上限约 8191。
+`SimpleCoapClient` 实现 `IDisposable`。`Dispose` 会：
 
-对应的工作项记录在 `CoapTestConsole/Issue.md`。
+1. 发布 `Disposed`；
+2. 停止心跳/重连；
+3. 停止命令与通知队列；
+4. 以 `ObjectDisposedException` 结束在途命令；
+5. 停止超时调度器；
+6. 释放 `AdsSession` 与通知句柄。
+
+`Dispose` 幂等，等待有界（约 2 秒）。建议使用 `using`：
+
+```csharp
+using var client = new SimpleCoapClient();
+client.Connect("YOUR_AMS_NET_ID", 851);
+```
+
+仍然建议**每个应用复用一个 client**，不要按命令创建；虽然现在有 `Dispose`，频繁创建/释放
+会话仍会增加 ADS 端口与句柄压力。TwinCAT 的句柄总数上限约 8191。
 
 ## 项目结构
 
@@ -497,16 +565,19 @@ ACK 校验、handle 清理、超时处理都会写日志；失败会在异常抛
 | `CoapClient/BRIEF.md` | 维护者说明，描述项目意图。 |
 | `CoapClient/CoapTestConsole/Issue.md` | 已知未决缺陷。 |
 | `CoapClient/CoapTestConsole/CoapClient_KnownIssues.md` | 异常语义上的坑，供下游使用方参考。 |
+| `CoapClient/CoapTestConsole/ReplacementTests.cs` | 实机冒烟测试（连接、命令、重连、Dispose）。 |
+| `CoapClient/CoapTestConsole/CHANGES_2026-10-28.md` | 2026-10-28 改动简述。 |
 
 重要的内部组件：
 
 | 组件 | 职责 |
 |---|---|
-| `ThinAdsServer` | 封装 TwinCAT ADS 连接、符号查找、读写与 notification。 |
-| `CommandContext` | 承载单条命令的生命周期与完成状态。 |
-| `CommandSender` | 串行化命令下发。 |
-| `CommandHandler` | 处理 ADS notification 并路由到对应的 command context。 |
-| `CommandInFlightManager` | 防止 ACK 变量冲突。 |
+| `ThinAdsServer` | 封装 TwinCAT ADS 连接、符号查找、读写、notification、心跳与重连。 |
+| `CoapConnectionState` / `CoapConnectionSnapshot` | 公开连接状态、不可变快照与状态变化事件。 |
+| `CommandContext` | 承载单条命令的生命周期、完成状态与连接代次。 |
+| `CommandSender` | 串行化命令下发，并在写前校验代次。 |
+| `CommandHandler` | 处理 ADS notification、丢弃旧代次通知并路由到 command context。 |
+| `CommandInFlightManager` | 防止 ACK 变量冲突，并支持断线/Dispose 时的清账与终结。 |
 | `TimeoutScheduler` | 调度命令超时回调。 |
 
 `SingleConsumerQueue<T>` 与 `ITimeoutItem` 属于实现细节，目前却是 `public` 声明 ——

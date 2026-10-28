@@ -10,6 +10,8 @@ It turns the common PLC interaction pattern of "write DO/AO, then poll DI/AI" in
 
 > Note: this project is not an implementation of the IETF CoAP protocol. In this project, COAP stands for Command Oriented Ads Protocol.
 
+> Since 0.4.x the client exposes connection state, a 1-second heartbeat, automatic reconnect and `IDisposable`. `Connected` requires a reachable ADS transport, a loaded symbol table and the PLC in `Run`.
+
 ## Command Sequence
 
 The sequence below shows how CoapClient prepares the ACK observation path before writing the command variable, then completes the command when the PLC publishes the expected ACK.
@@ -166,7 +168,12 @@ Main entry point for callers.
 | `object GetVariableValue(string varName)` | Reads a PLC variable value directly. |
 | `ISymbol? GetVariableSymbol(string varName)` | Looks up a PLC variable's symbol metadata — declared type, type category, byte size, members. Local lookup, no ADS round trip. Returns `null` when the variable does not exist. |
 | `object[] GetSumVariableValue(string[] varNames)` | Reads several PLC variable values in a single ADS sum read; the result aligns with `varNames`. |
-| `string GetServerStatusString()` | Reads the ADS server state as a string. |
+| `string GetServerStatusString()` | Returns the last known PLC state; when the transport is unavailable it returns the COAP state name (for example `Recovering`). No live ADS round trip. |
+| `CoapConnectionState ConnectionState` | Current COAP connection state. |
+| `CoapConnectionSnapshot ConnectionSnapshot` | Immutable snapshot (state, symbol table, generation, PLC state, last error). |
+| `AdsState? LastKnownPlcState` | Last known PLC `AdsState`. |
+| `event EventHandler<CoapConnectionStateChangedEventArgs> ConnectionStateChanged` | Raised when the connection state changes. |
+| `void Dispose()` | Stops heartbeat/reconnect, queues and timeout scheduler, faults in-flight commands and releases the ADS session. |
 | `static readonly TimeSpan DefaultAckTimeout` | Fallback ACK timeout, currently 1 minute. See [Timeouts](#timeouts). |
 
 Parameter validation: `SendAndWaitAck` throws `ArgumentNullException` when `command` is `null`,
@@ -181,6 +188,41 @@ object[] values = client.GetSumVariableValue(
     new[] { "PC_GVAR.DI_AT_POS", "PC_GVAR.AI_PRESSURE" });
 bool atPos = (bool)values[0];
 ```
+
+### Connection state and reconnect
+
+`SimpleCoapClient` probes the ADS state once per second in the background and reconnects automatically after a loss.
+
+| State | Meaning |
+|---|---|
+| `Disconnected` | Not connected yet, or the initial connect failed. |
+| `Connecting` | The initial `Connect` is running. |
+| `Connected` | ADS reachable, symbol table loaded, PLC in `Run`. |
+| `Recovering` | Transport lost, or the PLC is reachable but not in `Run`; retrying with backoff. |
+| `Disposed` | `Dispose` has been called. |
+
+**Publishing order is an invariant**: the symbol table is rebuilt and the snapshot is swapped atomically before `Connected` is published and the event is raised. A handler can therefore use the symbol table safely. While not `Connected`, symbol lookups throw `CoapNotConnectedException` and `SendAndWaitAck` returns a faulted task.
+
+```csharp
+client.ConnectionStateChanged += (sender, e) =>
+{
+    Console.WriteLine($"{e.OldState} -> {e.NewState} (generation {e.Generation})");
+};
+
+if (client.ConnectionState == CoapConnectionState.Connected)
+{
+    bool exists = client.VariableExists("PC_GVAR.DI_AT_POS");
+}
+```
+
+Recovery behavior:
+
+- A loss moves the client to `Recovering` and retries with 1s → 2s → 5s backoff.
+- Recovery disposes the old `AdsSession`, creates a fresh one, reloads the symbol table and then publishes `Connected`.
+- When the PLC is reachable but in `Stop`/`Config`, the client stays in `Recovering` and does not tear down the transport repeatedly.
+- The 21-second FailFast window is retained: calls after a loss fail fast instead of waiting for the 5-second ADS timeout.
+- **In-flight commands are never replayed automatically.** They end through their own timeout; notifications, symbol references and handles from the previous generation are dropped so they cannot affect commands on the new connection.
+- One client instance maps to one AMS target. A second `Connect` to the same target returns immediately; a different target throws `InvalidOperationException`. A failed initial connect is not retried automatically.
 
 ### Checking whether a variable exists
 
@@ -202,11 +244,12 @@ Behavior and constraints:
 | Variable exists in the loaded symbol table | `true` |
 | Variable does not exist | `false` |
 | `varName` is null, empty, or whitespace | throws `ArgumentException` |
-| `Connect` has not been called | throws `CoapNotConnectedException` |
+| The client is not `Connected` (not connected yet, reconnecting, or PLC not in `Run`) | throws `CoapNotConnectedException` |
 
-The symbol table is loaded during `Connect` and is **not refreshed automatically**. After
-the PLC application is re-downloaded, call `Connect` again before relying on this check —
-otherwise a stale table can report a variable that no longer exists.
+The symbol table is loaded during `Connect` and **rebuilt after every successful reconnect**.
+It is not refreshed while the connection stays up: after a PLC re-download or an Online Change,
+wait for a reconnect (or reconnect explicitly) before relying on the check. A stale table can
+otherwise report a variable that no longer exists.
 
 ### Reading a variable's type
 
@@ -236,16 +279,16 @@ DataTypeResolverExtension.TryGetManagedType(symbol.DataType, out Type? managed);
 ```
 
 Behavior matches `VariableExists`: the variable does not exist returns `null`, a null/empty name
-throws `ArgumentException`, and calling it before `Connect` throws `CoapNotConnectedException`.
+throws `ArgumentException`, and calling it while not `Connected` throws `CoapNotConnectedException`.
 
 Two things to keep in mind:
 
 - **The returned `ISymbol` is a live reference into the symbol table, not a copy.** Treat it as
   read-only.
-- **The type information is a snapshot taken at `Connect` and is not refreshed.** This is more
-  dangerous than a stale existence check: a stale *existence* answer at worst points you at a name
-  that is gone, while a stale *type* answer can make you parse correct data the wrong way and
-  silently produce wrong values. Re-connect after a PLC re-download before relying on it.
+- **Type information belongs to the current connection generation.** Every successful reconnect
+  rebuilds the symbol table; an `ISymbol` obtained before the reconnect becomes stale. Do not
+  cache it across `ConnectionStateChanged`. An Online Change while the connection stays up is not
+  refreshed automatically; wait for a reconnect before relying on it.
 
 This API is a query only. It does not participate in the command lifecycle — it cannot affect,
 and is not affected by, `SendAndWaitAck`.
@@ -408,6 +451,11 @@ Internally, a command moves through these states:
 
 Only one in-flight command can use the same ACK variable at the same time. This avoids ambiguous notification ownership.
 
+A connection loss is not a command terminal state. In-flight commands are never replayed
+automatically; they end through their own timeout. Notifications, symbol references and handles
+from the previous generation are dropped by the connection generation guard, so they cannot affect
+commands on the new connection.
+
 ## Exceptions
 
 `SendAndWaitAck` reports every terminal state through the returned task — either the ACK value,
@@ -421,13 +469,15 @@ call itself rather than through the task; see the notes.
 | `OperationCanceledException` (as `TaskCanceledException`) | The command was cancelled through the `CancellationToken`. |
 | `CoapResultConversionException` | **The command succeeded but the task still faulted.** See below. |
 | `CoapSymbolNotFoundException` | The variable is not in the loaded symbol table. Carries `VarName`. |
-| `CoapNotConnectedException` | `Connect` has not been called. |
+| `CoapNotConnectedException` | The connection is not `Connected` (not connected yet, reconnecting, or PLC not in `Run`). |
+| `ObjectDisposedException` | `SimpleCoapClient` has been disposed and a command is still being submitted. |
 | ADS exceptions (`AdsErrorException` and friends) | Propagated from the underlying `Beckhoff.TwinCAT.Ads` layer. |
 
 Synchronous throws:
 
 - `SendAndWaitAck` with a `null` command → `ArgumentNullException`.
 - `SendAndWaitAck` with a command that requires an ACK but has an empty `AckVarName` → `ArgumentException`.
+- `SendAndWaitAck` after `Dispose` → `ObjectDisposedException`.
 - `Connect` rethrows whatever the ADS layer reports, unchanged.
 
 ### `CoapResultConversionException` — do not retry blindly
@@ -462,7 +512,7 @@ catch (CoapSymbolNotFoundException ex)
 }
 catch (CoapNotConnectedException)
 {
-    Console.WriteLine("Call Connect() first.");
+    Console.WriteLine("Connection is not ready; wait for ConnectionState == Connected and retry.");
 }
 ```
 
@@ -483,8 +533,9 @@ logger     : [COAP]
 ```
 
 The repository is configured internally, so you do not need to add a log4net configuration to
-see library output. `Connect`, command dispatch, ACK validation, handle cleanup and timeout
-handling all write log entries; failures are logged before the exception is propagated.
+see library output. `Connect`, command dispatch, ACK validation, handle cleanup, timeout
+handling, connection loss and recovery all write log entries; failures are logged before the
+exception is propagated.
 
 ## Concurrency
 
@@ -494,16 +545,31 @@ handling all write log entries; failures are logged before the exception is prop
 - **The same ACK variable** cannot have two in-flight commands. The second one fails
   immediately with `CoapCommandCollisionException`.
 - Commands without an ACK are dispatched through a serialized sender.
+- Heartbeat and reconnect run on a single background loop per client and never race a `Connect`
+  against command dispatch.
+- `ConnectionStateChanged` is raised synchronously on a background thread. Keep handlers short,
+  do not block, and do not call `Connect`/`Dispose` synchronously from inside a handler.
 
 ## Lifetime
 
-`SimpleCoapClient` does **not** implement `IDisposable` yet, and there is no `Disconnect`. The
-underlying ADS connection is therefore held for the lifetime of the instance. Create **one
-client per application** and reuse it rather than constructing a new one per command —
-repeatedly creating clients leaks ADS connections and handles, and TwinCAT allows roughly
-8191 handles in total.
+`SimpleCoapClient` implements `IDisposable`. `Dispose`:
 
-See `CoapTestConsole/Issue.md` for the tracked work item.
+1. publishes `Disposed`;
+2. stops heartbeat/reconnect;
+3. stops command and notification queues;
+4. faults in-flight commands with `ObjectDisposedException`;
+5. stops the timeout scheduler;
+6. releases the `AdsSession` and its notification handles.
+
+`Dispose` is idempotent and bounded (about 2 seconds). Prefer `using`:
+
+```csharp
+using var client = new SimpleCoapClient();
+client.Connect("YOUR_AMS_NET_ID", 851);
+```
+
+Reuse one client per application where possible; frequent creation/disposal still puts pressure
+on ADS ports and handles, and TwinCAT allows roughly 8191 handles in total.
 
 ## Project Structure
 
@@ -516,16 +582,19 @@ Paths are relative to the repository root.
 | `CoapClient/BRIEF.md` | Maintainer notes describing the project intent. |
 | `CoapClient/CoapTestConsole/Issue.md` | Known open defects. |
 | `CoapClient/CoapTestConsole/CoapClient_KnownIssues.md` | Exception-semantics traps, for downstream consumers. |
+| `CoapClient/CoapTestConsole/ReplacementTests.cs` | Hardware smoke tests (connect, commands, reconnect, dispose). |
+| `CoapClient/CoapTestConsole/CHANGES_2026-10-28.md` | 2026-10-28 change summary. |
 
 Important internal components:
 
 | Component | Responsibility |
 |---|---|
-| `ThinAdsServer` | Wraps TwinCAT ADS connection, symbol lookup, read, write, and notifications. |
-| `CommandContext` | Holds one command lifecycle and completion state. |
-| `CommandSender` | Serializes command dispatch. |
-| `CommandHandler` | Handles ADS notifications and routes them to command contexts. |
-| `CommandInFlightManager` | Prevents ACK variable collisions. |
+| `ThinAdsServer` | Wraps TwinCAT ADS connection, symbol lookup, read, write, notifications, heartbeat and reconnect. |
+| `CoapConnectionState` / `CoapConnectionSnapshot` | Public connection state, immutable snapshot and state-change event. |
+| `CommandContext` | Holds one command lifecycle, completion state and connection generation. |
+| `CommandSender` | Serializes command dispatch and validates the generation before writing. |
+| `CommandHandler` | Handles ADS notifications, drops stale-generation notifications and routes to command contexts. |
+| `CommandInFlightManager` | Prevents ACK variable collisions and supports loss/dispose cleanup. |
 | `TimeoutScheduler` | Schedules command timeout callbacks. |
 
 `SingleConsumerQueue<T>` and `ITimeoutItem` are implementation details that are currently
