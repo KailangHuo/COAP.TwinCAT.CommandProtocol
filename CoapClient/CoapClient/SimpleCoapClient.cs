@@ -75,7 +75,7 @@ namespace CoapClient
                 Command = command,
                 TimeSpan = effectiveTimeout,
                 UnregisterCommandAction = this.CommandInFlightManager.UnregisterCommand,
-                DeleteNotificationHandleAction = this.ThinAdsServer.AdsClient.DeleteDeviceNotification,
+                DeleteNotificationHandleAction = this.ThinAdsServer.DeleteDeviceNotification,
                 TimeoutAckReadAction = this.ReadAckBytesAsync,
             };
 
@@ -127,7 +127,7 @@ namespace CoapClient
             }
         
             //ISymbol ackSymbol = this.ThinAdsServer.GetSymbol()
-            ResultValue<IAdsSymbol> symbolResult = await this.ThinAdsServer.AdsClient.ReadSymbolAsync(commandContext.Command.AckVarName,
+            ResultValue<IAdsSymbol> symbolResult = await this.ThinAdsServer.ReadSymbolAsync(commandContext.Command.AckVarName,
                 CancellationToken.None);
 
             // Without this guard a failed read leaves symbolResult.Value null, and the failure
@@ -153,7 +153,7 @@ namespace CoapClient
                 commandContext.Command.MaxDelayTime);
         
             // 握手
-            ResultHandle handle = await this.ThinAdsServer.AdsClient.AddDeviceNotificationAsync(
+            ResultHandle handle = await this.ThinAdsServer.AddDeviceNotificationAsync(
                 commandContext.Command.AckVarName,
                 symbol.ByteSize,
                 settings,
@@ -183,11 +183,19 @@ namespace CoapClient
     {
         IAdsSymbol symbol = commandContext.AckSymbol;
         byte[] buffer = new byte[symbol.ByteSize];
-        await this.ThinAdsServer.AdsClient.ReadAsync(
+        ResultReadBytes result = await this.ThinAdsServer.ReadAsync(
             symbol.IndexGroup,
             symbol.IndexOffset,
-            buffer.AsMemory(),
+            buffer.Length,
             CancellationToken.None);
+
+        // Preserve the previous Memory<byte> overload semantics: the caller always gets a
+        // buffer of symbol.ByteSize, left zero-filled when the read fails.
+        if (result.Succeeded)
+        {
+            int copyLength = Math.Min(result.Data.Length, buffer.Length);
+            result.Data.Span[..copyLength].CopyTo(buffer);
+        }
 
         return buffer;
     }
