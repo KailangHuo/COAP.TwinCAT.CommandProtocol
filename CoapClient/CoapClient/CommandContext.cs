@@ -43,10 +43,24 @@ internal class CommandContext : ITimeoutItem
     private int NotificationCleanupGate;
 
     public ICoapCommand Command = null!;
-    
+
+    /// <summary>Connection generation captured when the command was accepted.</summary>
+    public long Generation;
+
+    /// <summary>
+    /// Returns true while the captured generation is still the current connected epoch.
+    /// Null means "not generation-aware", which keeps non-COAP test/diagnostic paths working.
+    /// </summary>
+    public Func<long, bool>? IsGenerationValid;
+
     public ISymbol Symbol = null!;
 
     public IAdsSymbol AckSymbol = null!;
+
+    public bool IsGenerationCurrent()
+    {
+        return this.IsGenerationValid == null || this.IsGenerationValid(this.Generation);
+    }
     
     public TaskCompletionSource<object> AckTaskSource;
 
@@ -163,10 +177,24 @@ internal class CommandContext : ITimeoutItem
 
         try
         {
+            if (!this.IsGenerationCurrent())
+            {
+                this.TryFinish(CommandFinishResult.Timeout);
+                return;
+            }
+
             if (this.TimeoutAckReadAction != null)
             {
                 CoapLog.Info($"<{this.Command.AckVarName}> timeout in receiving, Client-Read triggered!");
                 byte[] rawBytes = await this.TimeoutAckReadAction(this).ConfigureAwait(false);
+
+                // The connection may have changed while the read was in flight.
+                if (!this.IsGenerationCurrent())
+                {
+                    this.TryFinish(CommandFinishResult.Timeout);
+                    return;
+                }
+
                 this.SetValue(rawBytes);
 
                 if (this.TryValidCommandOnServerRecall()) return;
@@ -195,6 +223,12 @@ internal class CommandContext : ITimeoutItem
             return false;
         }
 
+        // A late notification from an old connection must not complete a command that belongs
+        // to a newer generation. Do not touch the handle: the current connection may have
+        // reused that handle number.
+        if (!this.IsGenerationCurrent())
+            return false;
+
         if (this.ValidateAck())
         {
             this.TryFinish(CommandFinishResult.Success);
@@ -214,6 +248,7 @@ internal class CommandContext : ITimeoutItem
     public void TryCleanupNotificationHandle(uint handleIndex)
     {
         if (!this.Command.AckRequired || handleIndex == 0) return;
+        if (!this.IsGenerationCurrent()) return;
         if (Interlocked.CompareExchange(ref this.NotificationCleanupGate, 1, 0) != 0) return;
         CoapLog.Info("Try remove handle...");
         this.DeleteNotificationHandleAction?.Invoke(handleIndex);

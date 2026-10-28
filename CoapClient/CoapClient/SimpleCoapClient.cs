@@ -4,31 +4,75 @@ using TwinCAT.TypeSystem;
 
 namespace CoapClient
 {
-    public class SimpleCoapClient
+    public class SimpleCoapClient : IDisposable
 {
     public SimpleCoapClient()
     {
-        ThinAdsServer thinAdsServer = new ThinAdsServer();
-        this.ThinAdsServer = thinAdsServer;
-        this.CommandSender = new CommandSender(thinAdsServer);
+        this._lifecycleCts = new CancellationTokenSource();
         this.CommandInFlightManager = new CommandInFlightManager();
-        this.TimeoutScheduler = new TimeoutScheduler(CancellationToken.None);
+        this.ThinAdsServer = new ThinAdsServer(this.CommandInFlightManager, this._lifecycleCts.Token);
+        this.CommandSender = new CommandSender(this.ThinAdsServer);
+        this.TimeoutScheduler = new TimeoutScheduler(this._lifecycleCts.Token);
         this.ThinAdsServer.OnHandShakeSuccess += ThinAdsServerOnOnHandShakeSuccess;
-        
+        this.ThinAdsServer.ConnectionStateChanged += this.ThinAdsServerOnConnectionStateChanged;
     }
 
     private void ThinAdsServerOnOnHandShakeSuccess(CommandContext commandContext)
     {
-        this.CommandSender.EnqueueDispatchCommand(commandContext);
+        if (!this.CommandSender.EnqueueDispatchCommand(commandContext))
+        {
+            commandContext.TrySetBusinessResult(new ObjectDisposedException(nameof(SimpleCoapClient)));
+        }
     }
+
+    private readonly CancellationTokenSource _lifecycleCts;
 
     private ThinAdsServer ThinAdsServer;
 
     private CommandSender CommandSender;
-    
+
     private CommandInFlightManager CommandInFlightManager;
-    
+
     private TimeoutScheduler TimeoutScheduler;
+
+    private int Disposed;
+
+    public CoapConnectionState ConnectionState => this.ThinAdsServer.Snapshot.State;
+
+    public CoapConnectionSnapshot ConnectionSnapshot => this.ThinAdsServer.Snapshot;
+
+    public AdsState? LastKnownPlcState => this.ThinAdsServer.Snapshot.PlcState;
+
+    private event EventHandler<CoapConnectionStateChangedEventArgs>? ConnectionStateChangedHandlers;
+
+    public event EventHandler<CoapConnectionStateChangedEventArgs>? ConnectionStateChanged
+    {
+        add => this.ConnectionStateChangedHandlers += value;
+        remove => this.ConnectionStateChangedHandlers -= value;
+    }
+
+    private void ThinAdsServerOnConnectionStateChanged(
+        object? sender,
+        CoapConnectionStateChangedEventArgs e)
+    {
+        EventHandler<CoapConnectionStateChangedEventArgs>? handlers =
+            this.ConnectionStateChangedHandlers;
+
+        if (handlers == null)
+            return;
+
+        foreach (Delegate handler in handlers.GetInvocationList())
+        {
+            try
+            {
+                ((EventHandler<CoapConnectionStateChangedEventArgs>)handler)(this, e);
+            }
+            catch (Exception ex)
+            {
+                CoapLog.Error("ConnectionStateChanged handler failed.", ex);
+            }
+        }
+    }
 
     /// <summary>
     /// Timeout applied to an ACK-required command when neither the <c>timeSpan</c> argument nor
@@ -60,9 +104,19 @@ namespace CoapClient
                     "Command requires an ACK but its AckVarName is null or empty.", nameof(command));
             }
 
+            if (Volatile.Read(ref this.Disposed) != 0)
+            {
+                throw new ObjectDisposedException(nameof(SimpleCoapClient));
+            }
+
             if (cancellationToken.IsCancellationRequested)
             {
                 return Task.FromCanceled<object>(cancellationToken);
+            }
+
+            if (!this.ThinAdsServer.TryGetConnectedGeneration(out long generation))
+            {
+                return Task.FromException<object>(new CoapNotConnectedException());
             }
 
             CoapLog.Info($"<{command.AckVarName}> Enter SendAndWaitAckAsync");
@@ -73,9 +127,12 @@ namespace CoapClient
             CommandContext commandContext = new CommandContext()
             {
                 Command = command,
+                Generation = generation,
+                IsGenerationValid = this.ThinAdsServer.IsGenerationCurrent,
                 TimeSpan = effectiveTimeout,
                 UnregisterCommandAction = this.CommandInFlightManager.UnregisterCommand,
-                DeleteNotificationHandleAction = this.ThinAdsServer.DeleteDeviceNotification,
+                DeleteNotificationHandleAction =
+                    handle => this.ThinAdsServer.DeleteDeviceNotification(handle, generation),
                 TimeoutAckReadAction = this.ReadAckBytesAsync,
             };
 
@@ -108,11 +165,22 @@ namespace CoapClient
         {
             if (!commandContext.Command.AckRequired)
             {
-                this.CommandSender.EnqueueDispatchCommand(commandContext);
+                if (!commandContext.IsGenerationCurrent())
+                {
+                    commandContext.TrySetBusinessResult(new CoapNotConnectedException());
+                    return;
+                }
+
+                if (!this.CommandSender.EnqueueDispatchCommand(commandContext))
+                {
+                    commandContext.TrySetBusinessResult(
+                        new ObjectDisposedException(nameof(SimpleCoapClient)));
+                }
+
                 return;
             }
-        
-            bool registered = this.CommandInFlightManager.RegisterCommand(commandContext.Command.AckVarName);
+
+            bool registered = this.CommandInFlightManager.RegisterCommand(commandContext);
             if (!registered)
             {
                 CoapLog.Error($"<{commandContext.Command.AckVarName}> Command Collides!");
@@ -125,10 +193,22 @@ namespace CoapClient
                 commandContext.TryCleanupResources();
                 return;
             }
-        
+
+            if (!commandContext.IsGenerationCurrent())
+            {
+                commandContext.TrySetBusinessResult(new CoapNotConnectedException());
+                return;
+            }
+
             //ISymbol ackSymbol = this.ThinAdsServer.GetSymbol()
             ResultValue<IAdsSymbol> symbolResult = await this.ThinAdsServer.ReadSymbolAsync(commandContext.Command.AckVarName,
                 CancellationToken.None);
+
+            if (!commandContext.IsGenerationCurrent())
+            {
+                commandContext.TrySetBusinessResult(new CoapNotConnectedException());
+                return;
+            }
 
             // Without this guard a failed read leaves symbolResult.Value null, and the failure
             // surfaces later as a bare NullReferenceException from symbol.ByteSize / ReadAckBytesAsync.
@@ -140,6 +220,10 @@ namespace CoapClient
             {
                 CoapLog.Error($"<{commandContext.Command.AckVarName}> ReadSymbolAsync failed. " +
                               $"AdsErrorCode: {symbolResult.ErrorCode}");
+
+                if (!commandContext.IsGenerationCurrent())
+                    throw new CoapNotConnectedException();
+
                 throw new CoapSymbolNotFoundException(commandContext.Command.AckVarName);
             }
 
@@ -160,7 +244,13 @@ namespace CoapClient
                 commandContext,
                 default
                 );
-        
+
+            if (!commandContext.IsGenerationCurrent())
+            {
+                commandContext.TrySetBusinessResult(new CoapNotConnectedException());
+                return;
+            }
+
             commandContext.SetNotificationHandle(handle.Handle);
             if (commandContext.TryHandShake())
             {
@@ -168,7 +258,12 @@ namespace CoapClient
                 byte[] buffer = await this.ReadAckBytesAsync(commandContext);
                 commandContext.SetValue(buffer);
                 bool commandValidated = commandContext.TryValidCommandOnServerRecall();
-                if (!commandValidated) this.CommandSender.EnqueueDispatchCommand(commandContext);
+                if (!commandValidated
+                    && !this.CommandSender.EnqueueDispatchCommand(commandContext))
+                {
+                    commandContext.TrySetBusinessResult(
+                        new ObjectDisposedException(nameof(SimpleCoapClient)));
+                }
             }
         }
         catch (Exception e)
@@ -183,6 +278,10 @@ namespace CoapClient
     {
         IAdsSymbol symbol = commandContext.AckSymbol;
         byte[] buffer = new byte[symbol.ByteSize];
+
+        if (!commandContext.IsGenerationCurrent())
+            return buffer;
+
         ResultReadBytes result = await this.ThinAdsServer.ReadAsync(
             symbol.IndexGroup,
             symbol.IndexOffset,
@@ -203,11 +302,11 @@ namespace CoapClient
     /// <summary>
     /// Checks whether the given PLC variable exists in the locally cached symbol table.
     /// This is a local lookup only; no ADS round trip is performed.
-    /// The cache is loaded by <see cref="Connect"/> and is not refreshed automatically,
-    /// so re-connect after the PLC application is re-downloaded.
+    /// The cache is loaded by <see cref="Connect"/> and rebuilt after a successful reconnect.
+    /// It is not refreshed while the connection stays up (e.g. after an Online Change).
     /// </summary>
     /// <exception cref="ArgumentException">The variable name is null, empty, or whitespace.</exception>
-    /// <exception cref="InvalidOperationException">Not connected yet; the symbol table has not been loaded.</exception>
+    /// <exception cref="CoapNotConnectedException">The connection is not in the Connected state.</exception>
     public bool VariableExists(string varName)
     {
         try
@@ -230,10 +329,10 @@ namespace CoapClient
     /// <c>symbol.DataType</c> to the TwinCAT ADS type resolver.
     /// </para>
     /// <para>
-    /// The symbol table is loaded by <see cref="Connect"/> and is <b>not refreshed automatically</b>.
-    /// After the PLC application is re-downloaded, the type information may be stale - and stale
-    /// type information is more dangerous than a stale existence check, because it can make a caller
-    /// parse correct data the wrong way. Re-connect before relying on it.
+    /// The symbol table is loaded by <see cref="Connect"/> and rebuilt after a successful
+    /// reconnect. References obtained from an older connection generation become stale after
+    /// a reconnect - do not cache them across <see cref="ConnectionStateChanged"/> transitions.
+    /// The table is not refreshed while the connection stays up (e.g. after an Online Change).
     /// </para>
     /// </summary>
     /// <returns>The symbol, or <c>null</c> when the variable is not part of the current PLC project.</returns>
@@ -295,6 +394,28 @@ namespace CoapClient
             throw;
         }
     }
-    
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref this.Disposed, 1) != 0)
+            return;
+
+        this.ThinAdsServer.BeginDispose();
+        this.ThinAdsServer.ConnectionStateChanged -= this.ThinAdsServerOnConnectionStateChanged;
+        this._lifecycleCts.Cancel();
+
+        this.ThinAdsServer.WaitForMonitor(TimeSpan.FromSeconds(2));
+        this.CommandSender.Stop(TimeSpan.FromSeconds(2));
+
+        // Make old contexts' ADS cleanup a no-op before they are failed.
+        this.ThinAdsServer.DetachConnection();
+
+        this.CommandInFlightManager.Close(new ObjectDisposedException(nameof(SimpleCoapClient)));
+        this.TimeoutScheduler.Stop(TimeSpan.FromSeconds(2));
+
+        this.ThinAdsServer.CompleteDispose(TimeSpan.FromSeconds(2));
+
+        this._lifecycleCts.Dispose();
+    }
 }
 }

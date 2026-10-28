@@ -55,7 +55,8 @@ namespace CoapClient
     public sealed class CoapNotConnectedException : InvalidOperationException
     {
         public CoapNotConnectedException()
-            : base("The ADS symbol table has not been loaded. Call Connect() before querying variables.")
+            : base("The ADS connection is not in the Connected state. " +
+                   "Call Connect() and wait for the Connected event.")
         {
         }
     }

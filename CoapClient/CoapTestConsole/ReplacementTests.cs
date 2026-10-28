@@ -1,5 +1,7 @@
 using System.Diagnostics;
+using System.Reflection;
 using CoapClient;
+using TwinCAT.Ads;
 using TwinCAT.TypeSystem;
 
 /// <summary>
@@ -32,7 +34,7 @@ internal static class ReplacementTests
         Console.WriteLine($"DO/DI : {TestVar}");
         Console.WriteLine(new string('-', 72));
 
-        SimpleCoapClient client = new SimpleCoapClient();
+        using SimpleCoapClient client = new SimpleCoapClient();
         try
         {
             client.Connect(AmsNetId, AmsPort);
@@ -161,6 +163,33 @@ internal static class ReplacementTests
 
                 await WriteWithoutAckAsync(client, TestVar, false);
                 Assert(!(bool)client.GetVariableValue(TestVar), "PLC value should be false");
+            });
+
+            await RunTest("Serial toggle 1000x (true/false alternating)", async () =>
+            {
+                const int iterations = 1000;
+
+                // Start from false so the first command (true) actually writes.
+                await SetBoolAsync(client, TestVar, false, CommandTimeout);
+
+                Stopwatch stopwatch = Stopwatch.StartNew();
+                for (int i = 0; i < iterations; i++)
+                {
+                    bool expected = (i % 2) == 0; // true, false, true, ...
+                    object result = await SetBoolAsync(client, TestVar, expected, CommandTimeout);
+                    Assert((bool)result == expected,
+                        $"iteration {i}: expected {expected}, got {result}");
+
+                    if ((i + 1) % 100 == 0)
+                        Console.WriteLine($"       {i + 1}/{iterations} ({stopwatch.ElapsedMilliseconds} ms)");
+                }
+
+                stopwatch.Stop();
+
+                // 1000 is even, so the sequence ends on false.
+                bool finalValue = (bool)client.GetVariableValue(TestVar);
+                Assert(finalValue == false, "final value should be false after 1000 toggles");
+                Console.WriteLine($"       1000 toggles in {stopwatch.ElapsedMilliseconds} ms");
             });
 
             if (hasTestVar2)
@@ -292,6 +321,184 @@ internal static class ReplacementTests
                 Skip("ACK timeout", WitnessVar + " not found");
                 Skip("ACK cancellation", WitnessVar + " not found");
                 Skip("Duplicate ACK variable collision", WitnessVar + " not found");
+            }
+
+            await RunTest("Connected event fires after the symbol table is ready", () =>
+            {
+                using SimpleCoapClient fresh = new SimpleCoapClient();
+                List<CoapConnectionState> states = new List<CoapConnectionState>();
+                bool symbolsReadyInHandler = false;
+                bool stateReadyInHandler = false;
+                long generationInHandler = 0;
+
+                fresh.ConnectionStateChanged += (sender, e) =>
+                {
+                    states.Add(e.NewState);
+
+                    if (e.NewState == CoapConnectionState.Connected)
+                    {
+                        stateReadyInHandler =
+                            fresh.ConnectionState == CoapConnectionState.Connected;
+                        symbolsReadyInHandler =
+                            e.Snapshot.Symbols != null
+                            && fresh.VariableExists(TestVar);
+                        generationInHandler = e.Generation;
+                    }
+                };
+
+                fresh.Connect(AmsNetId, AmsPort);
+
+                Assert(states.Contains(CoapConnectionState.Connecting),
+                    "should observe Connecting");
+                Assert(states[^1] == CoapConnectionState.Connected,
+                    "last observed state should be Connected");
+                Assert(stateReadyInHandler, "ConnectionState should already be Connected in the handler");
+                Assert(symbolsReadyInHandler, "symbol table should be usable inside the Connected handler");
+                Assert(generationInHandler == fresh.ConnectionSnapshot.Generation,
+                    "event generation should match the snapshot generation");
+                Assert(fresh.VariableExists(TestVar), "symbol lookup after Connect should work");
+
+                return Task.CompletedTask;
+            });
+
+            await RunTest("Heartbeat detects disconnect and reconnects", async () =>
+            {
+                using SimpleCoapClient fresh = new SimpleCoapClient();
+                fresh.Connect(AmsNetId, AmsPort);
+                Assert(fresh.ConnectionState == CoapConnectionState.Connected,
+                    "fresh client should start connected");
+
+                // Test-only transport loss: reach the private AdsSession and close its local
+                // connection. The heartbeat must notice, publish Recovering, reconnect and
+                // reload the symbol table without any external PLC change.
+                FieldInfo serverField = typeof(SimpleCoapClient).GetField(
+                    "ThinAdsServer",
+                    BindingFlags.NonPublic | BindingFlags.Instance)
+                    ?? throw new Exception("ThinAdsServer field not found");
+
+                object server = serverField.GetValue(fresh)
+                    ?? throw new Exception("ThinAdsServer instance is null");
+
+                FieldInfo sessionField = server.GetType().GetField(
+                    "Session",
+                    BindingFlags.NonPublic | BindingFlags.Instance)
+                    ?? throw new Exception("Session field not found");
+
+                for (int cycle = 0; cycle < 3; cycle++)
+                {
+                    AdsSession session = (AdsSession?)sessionField.GetValue(server)
+                        ?? throw new Exception($"Session instance is null in cycle {cycle}");
+
+                    session.Disconnect();
+
+                    DateTime deadline = DateTime.UtcNow + TimeSpan.FromSeconds(20);
+                    bool sawRecovering = false;
+                    bool sawReconnected = false;
+
+                    while (DateTime.UtcNow < deadline)
+                    {
+                        if (fresh.ConnectionState == CoapConnectionState.Recovering)
+                            sawRecovering = true;
+
+                        if (sawRecovering
+                            && fresh.ConnectionState == CoapConnectionState.Connected)
+                        {
+                            sawReconnected = true;
+                            break;
+                        }
+
+                        await Task.Delay(100);
+                    }
+
+                    Assert(sawRecovering,
+                        $"cycle {cycle}: heartbeat should publish Recovering after the transport drops");
+                    Assert(sawReconnected,
+                        $"cycle {cycle}: heartbeat should reconnect and publish Connected");
+                    Assert(fresh.VariableExists(TestVar),
+                        $"cycle {cycle}: symbol table should be reloaded after reconnect");
+                }
+
+                await SetBoolAsync(fresh, TestVar, false, CommandTimeout);
+                object result = await SetBoolAsync(fresh, TestVar, true, CommandTimeout);
+                Assert((bool)result, "commands should work after reconnect");
+            });
+
+            await RunTest("Dispose is idempotent and rejects further commands", async () =>
+            {
+                SimpleCoapClient fresh = new SimpleCoapClient();
+                fresh.Connect(AmsNetId, AmsPort);
+                fresh.Dispose();
+
+                Assert(fresh.ConnectionState == CoapConnectionState.Disposed,
+                    "state should be Disposed");
+                Assert(fresh.ConnectionSnapshot.Symbols == null,
+                    "symbol table should be cleared");
+
+                try
+                {
+                    await fresh.SendAndWaitAck(new CoapCommandItem(
+                        new VariableWriteItem(TestVar, true),
+                        null!));
+                    throw new Exception("expected ObjectDisposedException");
+                }
+                catch (ObjectDisposedException)
+                {
+                }
+
+                try
+                {
+                    fresh.GetVariableValue(TestVar);
+                    throw new Exception("expected CoapNotConnectedException");
+                }
+                catch (CoapNotConnectedException)
+                {
+                }
+
+                fresh.Dispose(); // second call must be a no-op
+            });
+
+            if (hasWitness)
+            {
+                await RunTest("Dispose completes an in-flight command", async () =>
+                {
+                    SimpleCoapClient fresh = new SimpleCoapClient();
+                    fresh.Connect(AmsNetId, AmsPort);
+
+                    byte impossible = (byte)(
+                        Convert.ToByte(fresh.GetVariableValue(WitnessVar)) == byte.MaxValue
+                            ? 0
+                            : byte.MaxValue);
+
+                    CoapCommandItem command = new CoapCommandItem(
+                        new VariableWriteItem(TestVar, true),
+                        new AckPredicate<byte>(WitnessVar, PredicateType.Equals, impossible));
+
+                    Task<object> pending = fresh.SendAndWaitAck(
+                        command,
+                        TimeSpan.FromSeconds(30));
+
+                    await Task.Delay(100);
+
+                    Stopwatch stopwatch = Stopwatch.StartNew();
+                    fresh.Dispose();
+                    stopwatch.Stop();
+
+                    Assert(stopwatch.Elapsed < TimeSpan.FromSeconds(8),
+                        "Dispose should be bounded, took " + stopwatch.Elapsed);
+
+                    try
+                    {
+                        await pending;
+                        throw new Exception("expected ObjectDisposedException");
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                    }
+                });
+            }
+            else
+            {
+                Skip("Dispose completes an in-flight command", WitnessVar + " not found");
             }
         }
         finally

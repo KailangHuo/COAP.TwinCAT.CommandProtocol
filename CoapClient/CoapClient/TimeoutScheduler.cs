@@ -3,7 +3,7 @@ using System.Threading.Channels;
 
 namespace CoapClient
 {
-    internal class TimeoutScheduler
+    internal class TimeoutScheduler : IDisposable
 {
     public TimeoutScheduler(CancellationToken token)
     {
@@ -36,6 +36,8 @@ namespace CoapClient
     private readonly Task WorkerTask;
 
     private readonly AutoResetEvent WorkerEvent;
+
+    private int Stopped;
 
     private void EnqueueTimeoutItem(ITimeoutItem item)
     {
@@ -79,6 +81,9 @@ namespace CoapClient
         if (timeoutItem == null)
             throw new ArgumentNullException(nameof(timeoutItem));
 
+        if (Volatile.Read(ref this.Stopped) != 0)
+            throw new ObjectDisposedException(nameof(TimeoutScheduler));
+
         // The channel is unbounded and its writer is never completed, so this cannot fail for
         // capacity reasons. Kept as a safety net: dropping the item silently would leave the
         // command without a timeout and hang the caller, so fail loudly instead.
@@ -89,6 +94,47 @@ namespace CoapClient
         }
 
         this.WorkerEvent.Set();
+    }
+
+    /// <summary>
+    /// Stops the worker, waits for it (bounded), and releases the pending command contexts.
+    /// Idempotent.
+    /// </summary>
+    public void Stop(TimeSpan timeout)
+    {
+        if (Interlocked.Exchange(ref this.Stopped, 1) != 0)
+            return;
+
+        this.TimeoutItemChannel.Writer.TryComplete();
+        this.WorkerEvent.Set();
+
+        bool joined = false;
+        try
+        {
+            joined = this.WorkerTask.Wait(timeout);
+        }
+        catch (AggregateException e)
+        {
+            CoapLog.Error("TimeoutScheduler worker ended with an exception.", e);
+            joined = true;
+        }
+
+        if (!joined)
+            CoapLog.Error("TimeoutScheduler worker did not stop within the dispose timeout.");
+
+        // Completed contexts stay in the heap until their deadline; drop them on dispose.
+        this.TimeoutMinHeap.Clear();
+        while (this.TimeoutItemChannel.Reader.TryRead(out _))
+        {
+        }
+
+        if (joined)
+            this.WorkerEvent.Dispose();
+    }
+
+    public void Dispose()
+    {
+        this.Stop(TimeSpan.FromSeconds(2));
     }
 
     private void RunWorkerLoop(CancellationToken token)

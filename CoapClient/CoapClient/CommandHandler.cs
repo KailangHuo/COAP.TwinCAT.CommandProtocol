@@ -11,9 +11,14 @@ namespace CoapClient
 
         private SingleConsumerQueue<INotification> NotificationQueue;
 
-        public void EnqueueNotification(INotification iNotification)
+        public bool EnqueueNotification(INotification iNotification)
         {
-            this.NotificationQueue.EnqueueItem(iNotification);
+            return this.NotificationQueue.EnqueueItem(iNotification);
+        }
+
+        public void Stop(TimeSpan timeout)
+        {
+            this.NotificationQueue.Stop(timeout, null);
         }
     
         private void OnNotificationReceived(INotification e)
@@ -23,6 +28,15 @@ namespace CoapClient
             {
                 if (e.UserData == null) throw new ArgumentNullException($"notification.UserData is NULL!");
                 CommandContext commandContext = (CommandContext)e.UserData;
+
+                // Do not let a notification from an old connection mutate a command that
+                // belongs to a newer epoch.
+                if (!commandContext.IsGenerationCurrent())
+                {
+                    CoapLog.Info($"Dropping stale notification for <{commandContext.Command.AckVarName}>.");
+                    return;
+                }
+
                 commandContext.SetNotificationHandle(e.Handle);
                 if (commandContext.IsFinished())
                 {

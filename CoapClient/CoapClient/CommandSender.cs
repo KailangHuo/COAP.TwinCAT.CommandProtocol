@@ -13,15 +13,30 @@
         private ICommandDispatcher ICommandDispatcher { get; }
     
     
-        public void EnqueueDispatchCommand(CommandContext commandContext)
+        public bool EnqueueDispatchCommand(CommandContext commandContext)
         {
-            this.CommandQueue.EnqueueItem(commandContext);
+            return this.CommandQueue.EnqueueItem(commandContext);
+        }
+
+        public void Stop(TimeSpan timeout)
+        {
+            this.CommandQueue.Stop(
+                timeout,
+                context => context.TrySetBusinessResult(
+                    new ObjectDisposedException(nameof(SimpleCoapClient))));
         }
 
         private void QueuedCommandAction(CommandContext commandContext)
         {
             try
             {
+                if (!commandContext.IsGenerationCurrent())
+                {
+                    CoapLog.Info($"<{commandContext.Command.AckVarName}> Command dropped: connection generation changed.");
+                    commandContext.TrySetBusinessResult(new CoapNotConnectedException());
+                    return;
+                }
+
                 if (!commandContext.TryBeginDispatch())
                 {
                     CoapLog.Info($"<{commandContext.Command.AckVarName}> Command dispatch skipped");

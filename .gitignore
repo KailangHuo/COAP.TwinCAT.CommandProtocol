@@ -14,3 +14,6 @@ nupkg-out/
 # Runtime logs
 **/Logs/
 *.log
+
+# Local secrets
+nuget-key.txt
